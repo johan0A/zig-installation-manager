@@ -12,7 +12,7 @@ pub fn init(child: *std.Io.Reader, node: std.Progress.Node, total_bytes: ?usize,
         .node = node,
         .transferred_bytes = 0,
         .total_bytes = total_bytes,
-        .transfer_limit = .limited(total_bytes orelse 1 / 100 + 1),
+        .transfer_limit = if (total_bytes) |n| .limited(n / 100 + 1) else .unlimited,
         .reader = .{
             .vtable = &.{ .stream = stream },
             .buffer = buffer,
