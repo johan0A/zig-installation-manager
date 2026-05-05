@@ -1,0 +1,8 @@
+.{
+    .name = .zim,
+    .version = "0.0.1",
+    .dependencies = .{},
+    .minimum_zig_version = "0.16.0",
+    .paths = .{""},
+    .fingerprint = 0x211bf99fd840a9f6,
+}

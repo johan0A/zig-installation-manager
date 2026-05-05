@@ -1,0 +1,531 @@
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const gpa = init.gpa;
+    const arena = init.arena.allocator();
+
+    var exe_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const exe_path_len = try std.process.executableDirPath(io, &exe_path_buf);
+    const exe_dir: std.Io.Dir = try .openDirAbsolute(io, exe_path_buf[0..exe_path_len], .{ .iterate = true });
+    const data_dir = try exe_dir.createDirPathOpen(io, "zim-data", .{ .open_options = .{ .iterate = true } });
+
+    var args = try init.minimal.args.iterateAllocator(arena);
+    _ = args.next();
+    const command = args.next() orelse fatalAndPrintUsage("missing command argument", .{});
+
+    const root = std.Progress.start(io, .{ .root_name = "zim" });
+    defer root.end();
+
+    var seed: u64 = undefined;
+    io.random(std.mem.asBytes(&seed));
+    var prng: std.Random.DefaultPrng = .init(seed);
+    const random = prng.random();
+
+    if (anyEql(command, &.{ "fetch", "f" })) {
+        var version: ?[]const u8 = null;
+        var force = false;
+        var zls = false;
+        while (args.next()) |arg| {
+            if (anyEql(arg, &.{ "-h", "--help" })) {
+                std.log.info("{s}", .{fetch_usage});
+                return;
+            } else if (anyEql(arg, &.{"--force"})) {
+                force = true;
+            } else if (anyEql(arg, &.{"--zls"})) {
+                zls = true;
+            } else if (std.mem.startsWith(u8, arg, "-")) {
+                fatal("unrecognized flag: {s}", .{arg});
+            } else {
+                version = arg;
+            }
+        }
+        const v = version orelse fatal("missing version argument", .{});
+        try fetchVersion(io, arena, gpa, random, root, data_dir, v, force, zls);
+    } else if (anyEql(command, &.{ "switch", "s" })) {
+        var version: ?[]const u8 = null;
+        while (args.next()) |arg| {
+            if (anyEql(arg, &.{ "-h", "--help" })) {
+                std.log.info("{s}", .{switch_usage});
+                return;
+            } else if (std.mem.startsWith(u8, arg, "-")) {
+                fatal("unrecognized flag: {s}", .{arg});
+            } else {
+                version = arg;
+            }
+        }
+        const v = version orelse fatal("missing version argument", .{});
+        try switchVersion(io, arena, v, data_dir);
+    } else if (anyEql(command, &.{ "remove", "rm" })) {
+        var version: ?[]const u8 = null;
+        while (args.next()) |arg| {
+            if (anyEql(arg, &.{ "-h", "--help" })) {
+                std.log.info("{s}", .{remove_usage});
+                return;
+            } else if (std.mem.startsWith(u8, arg, "-")) {
+                fatal("unrecognized flag: {s}", .{arg});
+            } else {
+                version = arg;
+            }
+        }
+        const v = version orelse fatal("missing version argument", .{});
+        try removeVersion(io, v, data_dir);
+    } else {
+        fatalAndPrintUsage("invalid command: {s}", .{command});
+    }
+}
+
+fn anyEql(needle: []const u8, haystack: []const []const u8) bool {
+    for (haystack) |item| if (std.mem.eql(u8, item, needle)) return true;
+    return false;
+}
+
+fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
+    std.log.err(fmt, args);
+    std.process.exit(1);
+}
+
+fn fatalAndPrintUsage(comptime fmt: []const u8, args: anytype) noreturn {
+    std.log.err(fmt, args);
+    std.log.info("{s}", .{usage});
+    std.process.exit(1);
+}
+
+fn switchVersion(
+    io: std.Io,
+    arena: std.mem.Allocator,
+    version: []const u8,
+    data_dir: std.Io.Dir,
+) !void {
+    data_dir.access(io, version, .{}) catch |err| switch (err) {
+        error.FileNotFound => fatal("version {s} is not fetched", .{version}),
+        else => |e| return e,
+    };
+
+    try data_dir.deleteTree(io, symlink_dir_path);
+    try data_dir.createDir(io, symlink_dir_path, .default_dir);
+
+    const zig_target_path = try std.Io.Dir.path.join(arena, &.{ "..", version, "zig/zig" });
+    const zig_link_path = try std.Io.Dir.path.join(arena, &.{ symlink_dir_path, "zig" });
+    try data_dir.symLink(io, zig_target_path, zig_link_path, .{});
+
+    const zls_path = try std.Io.Dir.path.join(arena, &.{ version, "zls" });
+    if (try fileExists(io, data_dir, zls_path)) {
+        const zls_target_path = try std.Io.Dir.path.join(arena, &.{ "..", version, "zls/zls" });
+        const zls_link_path = try std.Io.Dir.path.join(arena, &.{ symlink_dir_path, "zls" });
+        try data_dir.symLink(io, zls_target_path, zls_link_path, .{});
+    }
+
+    std.log.info("active version: {s}", .{version});
+}
+
+fn removeVersion(
+    io: std.Io,
+    version: []const u8,
+    data_dir: std.Io.Dir,
+) !void {
+    data_dir.access(io, version, .{}) catch |err| switch (err) {
+        error.FileNotFound => fatal("version {s} is not fetched", .{version}),
+        else => |e| return e,
+    };
+
+    try data_dir.deleteTree(io, version);
+
+    std.log.info("removed version: {s}", .{version});
+}
+
+fn fetchVersion(
+    io: std.Io,
+    arena: std.mem.Allocator,
+    gpa: std.mem.Allocator,
+    random: std.Random,
+    progress_node: std.Progress.Node,
+    data_dir: std.Io.Dir,
+    version_str: []const u8,
+    force: bool,
+    zls: bool,
+) !void {
+    const zig_version: std.SemanticVersion = try .parse(version_str);
+
+    var version_dir: std.Io.Dir = try .createDirPathOpen(data_dir, io, version_str, .{});
+    defer version_dir.close(io);
+
+    const zig_already_fetched = try fileExists(io, version_dir, "zig");
+
+    if (zig_already_fetched and force) {
+        try version_dir.deleteTree(io, "zig");
+        try version_dir.deleteTree(io, "zls");
+    }
+
+    const zls_already_fetched = try fileExists(io, version_dir, "zls");
+    const fetch_zig = force or !zig_already_fetched;
+    const fetch_zls = zls and !zls_already_fetched;
+
+    if (!fetch_zig and !fetch_zls) {
+        std.log.info("version {s} already fetched (use --force to re-fetch)", .{version_str});
+        return;
+    }
+
+    if (fetch_zig) {
+        const tarball_name = switch (zig_version.order(.{ .major = 0, .minor = 14, .patch = 1 })) {
+            .lt => try std.fmt.allocPrint(arena, "zig-{t}-{t}-{s}.tar.xz", .{
+                builtin.target.os.tag, builtin.target.cpu.arch, version_str,
+            }),
+            .eq, .gt => try std.fmt.allocPrint(arena, "zig-{t}-{t}-{s}.tar.xz", .{
+                builtin.target.cpu.arch, builtin.target.os.tag, version_str,
+            }),
+        };
+
+        const mirrors_body = try fetchMirrors(io, arena, data_dir, progress_node);
+
+        var urls: std.ArrayList([]const u8) = .empty;
+        defer urls.deinit(gpa);
+
+        var lines = std.mem.splitScalar(u8, mirrors_body, '\n');
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
+            if (trimmed.len != 0) try urls.append(gpa, trimmed);
+        }
+        random.shuffle([]const u8, urls.items);
+
+        const ziglang_link = try std.fmt.allocPrint(arena, "https://ziglang.org/download/{s}", .{version_str});
+        try urls.append(gpa, ziglang_link);
+
+        for (urls.items) |mirror| {
+            fetchFromMirror(
+                io,
+                gpa,
+                arena,
+                random,
+                progress_node,
+                mirror,
+                tarball_name,
+                zig_pubkey,
+                1,
+                version_dir,
+                "zig",
+            ) catch |err| {
+                std.log.warn("mirror {s} failed: {s}", .{ mirror, @errorName(err) });
+                continue;
+            };
+            std.log.info("fetched zig {s}", .{version_str});
+            break;
+        } else {
+            return error.AllMirrorsFailed;
+        }
+    }
+
+    if (fetch_zls) {
+        const url = try std.fmt.allocPrint(
+            arena,
+            "https://releases.zigtools.org/v1/zls/select-version?zig_version={f}&compatibility=only-runtime",
+            .{zig_version},
+        );
+
+        var http: HttpGet = undefined;
+        var transfer_buf: [8 * 1024]u8 = undefined;
+        const select_version_stream = try http.init(io, gpa, url, &transfer_buf);
+        defer http.deinit();
+
+        var json_tokenizer: std.json.Reader = .init(arena, select_version_stream);
+        const select_version = try std.json.parseFromTokenSourceLeaky(std.json.Value, arena, &json_tokenizer, .{});
+
+        if (select_version.object.get("code")) |code| {
+            const message = select_version.object.get("message").?.string;
+            std.log.err("{d}: {s}", .{ code.integer, message });
+            return error.NoCompatibleZls;
+        }
+
+        const zls_version = select_version.object.get("version").?.string;
+
+        const tarball_name = switch (zig_version.order(.{ .major = 0, .minor = 14, .patch = 1 })) {
+            .lt => try std.fmt.allocPrint(arena, "zls-{t}-{t}-{s}.tar.xz", .{
+                builtin.target.os.tag, builtin.target.cpu.arch, zls_version,
+            }),
+            .eq, .gt => try std.fmt.allocPrint(arena, "zls-{t}-{t}-{s}.tar.xz", .{
+                builtin.target.cpu.arch, builtin.target.os.tag, zls_version,
+            }),
+        };
+
+        try fetchFromMirror(
+            io,
+            gpa,
+            arena,
+            random,
+            progress_node,
+            "https://builds.zigtools.org",
+            tarball_name,
+            zls_pubkey,
+            0,
+            version_dir,
+            "zls",
+        );
+        std.log.info("fetched zls {s}", .{zls_version});
+    }
+}
+
+fn fileExists(io: std.Io, dir: std.Io.Dir, sub_path: []const u8) !bool {
+    return if (dir.access(io, sub_path, .{})) true else |err| switch (err) {
+        error.FileNotFound => false,
+        else => |e| e,
+    };
+}
+
+fn fetchMirrors(
+    io: std.Io,
+    arena: std.mem.Allocator,
+    data_dir: std.Io.Dir,
+    progress_node: std.Progress.Node,
+) ![]u8 {
+    const node = progress_node.start("fetching mirrors list", 0);
+    defer node.end();
+
+    (b: {
+        var get: HttpGet = undefined;
+        var buf: [1024 * 8]u8 = undefined;
+        const reader = get.init(io, arena, zig_mirrors_url, &buf) catch |e| break :b e;
+        defer get.deinit();
+
+        const body = reader.allocRemaining(arena, .unlimited) catch |e| break :b e;
+
+        data_dir.writeFile(io, .{ .sub_path = zig_mirrors_cache_path, .data = body }) catch {};
+        return body;
+    }) catch {
+        const body = try data_dir.readFileAlloc(io, zig_mirrors_cache_path, arena, .unlimited);
+        std.log.warn("failed to fetch mirror list, using cached list instead", .{});
+        return body;
+    };
+}
+
+fn fetchFromMirror(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    random: std.Random,
+    progress_node: std.Progress.Node,
+    mirror_url: []const u8,
+    tarball_name: []const u8,
+    minisig_pubkey: []const u8,
+    strip_components: u32,
+    dir: std.Io.Dir,
+    sub_path: []const u8,
+) !void {
+    const mirror_node = progress_node.startFmt(0, "fetching {s} from {s}", .{ tarball_name, mirror_url });
+    defer mirror_node.end();
+
+    const signature_url = try std.fmt.allocPrint(arena, "{s}/{s}.minisig?source=zim", .{ mirror_url, tarball_name });
+
+    var signature_get: HttpGet = undefined;
+    var buf: [1024 * 8]u8 = undefined;
+    const signature_reader = try signature_get.init(io, gpa, signature_url, &buf);
+    defer signature_get.deinit();
+
+    const minisig = try signature_reader.allocRemaining(arena, .unlimited);
+
+    const tarball_url = try std.fmt.allocPrint(arena, "{s}/{s}?source=zim", .{ mirror_url, tarball_name });
+
+    const temp_file_sub_path = ".tmp-" ++ std.fmt.hex(random.int(u64));
+    const temp_file = try dir.createFile(io, temp_file_sub_path, .{ .read = true });
+    defer temp_file.close(io);
+    defer dir.deleteFile(io, temp_file_sub_path) catch {};
+
+    {
+        const download_node = progress_node.start("download", 0);
+        defer download_node.end();
+
+        var get: HttpGet = undefined;
+        var transfer_buf: [1024]u8 = undefined; // TODO: readerDecompressing has undocumented minimum transfer_buf size
+        const get_reader = try get.init(io, gpa, tarball_url, &transfer_buf);
+        defer get.deinit();
+
+        var progress_reader: ProgressReader = .init(get_reader, download_node, get.content_length, &.{});
+
+        var blake2: std.crypto.hash.blake2.Blake2b512 = .init(.{});
+        var hash_buf: [1024 * 8]u8 = undefined;
+        var hashed_reader = progress_reader.reader.hashed(&blake2, &hash_buf);
+
+        var file_writer_buf: [1024 * 8]u8 = undefined;
+        var temp_file_writer = temp_file.writer(io, &file_writer_buf);
+        _ = try hashed_reader.reader.streamRemaining(&temp_file_writer.interface);
+        try temp_file_writer.interface.flush();
+
+        var hash: [64]u8 = undefined;
+        hashed_reader.hasher.final(&hash);
+        try verifyMinisig(&hash, minisig, minisig_pubkey, tarball_name);
+    }
+
+    {
+        const extract_node = progress_node.start("extract", 0);
+        defer extract_node.end();
+
+        var read_buf: [1024 * 8]u8 = undefined;
+        var file_reader = temp_file.reader(io, &read_buf);
+
+        var progress_reader_buf: [1024 * 8]u8 = undefined;
+        var progress_reader: ProgressReader = .init(&file_reader.interface, extract_node, file_reader.getSize() catch null, &progress_reader_buf);
+
+        var xz: std.compress.xz.Decompress = try .init(&progress_reader.reader, gpa, &.{});
+        defer xz.deinit();
+
+        const dest_dir: std.Io.Dir = try .createDirPathOpen(dir, io, sub_path, .{});
+        try std.tar.extract(io, dest_dir, &xz.reader, .{ .strip_components = strip_components });
+    }
+}
+
+fn verifyMinisig(
+    file_hash: *const [64]u8,
+    minisig: []const u8,
+    pubkey_str: []const u8,
+    expected_filename: []const u8,
+) !void {
+    var public_key_buf: [42]u8 = undefined;
+    _ = try std.base64.standard.Decoder.decode(&public_key_buf, pubkey_str);
+    const public_key_id = public_key_buf[2..10];
+    const public_key: Ed25519.PublicKey = try .fromBytes(public_key_buf[10..].*);
+
+    var lines = std.mem.splitScalar(u8, minisig, '\n');
+    _ = lines.next() orelse return error.InvalidSignature;
+
+    const signature_line = lines.next() orelse return error.InvalidSignature;
+    var signature_buf: [74]u8 = undefined;
+    _ = try std.base64.standard.Decoder.decode(&signature_buf, signature_line);
+
+    if (!std.mem.eql(u8, signature_buf[0..2], "ED")) return error.InvalidSignature;
+    if (!std.mem.eql(u8, signature_buf[2..10], public_key_id)) return error.InvalidSignature;
+    const signature_bytes = signature_buf[10..74].*;
+
+    const signature: Ed25519.Signature = .fromBytes(signature_bytes);
+    try signature.verify(file_hash, public_key);
+
+    const trusted_comment_line = lines.next() orelse return error.InvalidSignature;
+    const trusted_comment_prefix = "trusted comment: ";
+    if (!std.mem.startsWith(u8, trusted_comment_line, trusted_comment_prefix)) return error.InvalidSignature;
+
+    const trusted_comment = trusted_comment_line[trusted_comment_prefix.len..];
+    if (trusted_comment.len > 1024) return error.InvalidSignature;
+
+    const global_signature_line = lines.next() orelse return error.InvalidSignature;
+    var global_signature_buf: [64]u8 = undefined;
+    _ = try std.base64.standard.Decoder.decode(
+        &global_signature_buf,
+        std.mem.trim(u8, global_signature_line, &std.ascii.whitespace),
+    );
+    const global_signature: Ed25519.Signature = .fromBytes(global_signature_buf);
+
+    var global_msg: [64 + 1024]u8 = undefined;
+    @memcpy(global_msg[0..64], &signature_bytes);
+    @memcpy(global_msg[64..][0..trusted_comment.len], trusted_comment);
+    try global_signature.verify(global_msg[0 .. 64 + trusted_comment.len], public_key);
+
+    const file_prefix = "file:";
+    const file_prefix_index = std.mem.find(u8, trusted_comment, file_prefix) orelse return error.FilenameMismatch;
+    const after_prefix = trusted_comment[file_prefix_index + file_prefix.len ..];
+    const filename_end = std.mem.findAny(u8, after_prefix, &std.ascii.whitespace) orelse after_prefix.len;
+    if (!std.mem.eql(u8, after_prefix[0..filename_end], expected_filename)) return error.FilenameMismatch;
+}
+
+const HttpGet = struct {
+    http_client: std.http.Client,
+    request: std.http.Client.Request,
+    decompress: std.http.Decompress,
+    decompress_buf: [std.compress.flate.max_window_len]u8,
+    content_length: ?u64,
+
+    fn init(
+        self: *HttpGet,
+        io: std.Io,
+        gpa: std.mem.Allocator,
+        url: []const u8,
+        transfer_buf: []u8,
+    ) !*std.Io.Reader {
+        self.http_client = .{ .allocator = gpa, .io = io };
+        errdefer self.http_client.deinit();
+
+        self.request = try self.http_client.request(.GET, try .parse(url), .{});
+        errdefer self.request.deinit();
+        try self.request.sendBodiless();
+
+        var redirect_buf: [8000]u8 = undefined;
+        var response = try self.request.receiveHead(&redirect_buf);
+        self.content_length = response.head.content_length;
+
+        switch (response.head.status.class()) {
+            .success => {},
+            .informational => return error.HttpInformational,
+            .redirect => return error.HttpRedirect,
+            .client_error => return error.HttpClientError,
+            .server_error => return error.HttpServerError,
+        }
+
+        return response.readerDecompressing(
+            transfer_buf,
+            &self.decompress,
+            &self.decompress_buf,
+        );
+    }
+
+    fn deinit(self: *HttpGet) void {
+        self.request.deinit();
+        self.http_client.deinit();
+    }
+};
+
+const VersionIndex = struct {};
+
+pub const usage =
+    \\Usage: zim [command] [options]
+    \\
+    \\Commands:
+    \\  fetch, f               Download a Zig version
+    \\  switch, s              Select a fetched version
+    \\  remove, rm             Delete a locally fetched version
+    \\  help, h                Show this message
+    \\
+    \\Options:
+    \\  -h, --help             Show command-specific usage
+    \\
+;
+
+pub const fetch_usage =
+    \\Usage: zim fetch [version] [options]
+    \\
+    \\Options:
+    \\  --force        Re-fetch even if the version is already present
+    \\  --zls          Fetch Zls along with Zig
+    \\  -h, --help     Show this help
+    \\
+;
+
+pub const switch_usage =
+    \\Usage: zim switch [version]
+    \\
+    \\Activates a previously fetched version by updating the
+    \\`bin` symlink in the zim-data directory.
+    \\
+    \\Options:
+    \\  -h, --help     Show this help
+    \\
+;
+
+pub const remove_usage =
+    \\Usage: zim remove [version]
+    \\
+    \\Remove a fetched version
+    \\
+    \\Options:
+    \\  -h, --help     Show this help
+    \\
+;
+
+const zig_pubkey = "RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U";
+const zls_pubkey = "RWR+9B91GBZ0zOjh6Lr17+zKf5BoSuFvrx2xSeDE57uIYvnKBGmMjOex";
+
+const zig_version_index_url = "https://ziglang.org/download/index.json";
+
+const zig_mirrors_url = "https://ziglang.org/download/community-mirrors.txt";
+const zig_mirrors_cache_path = "zig-mirrors.txt";
+
+const symlink_dir_path = "bin";
+
+const std = @import("std");
+const builtin = @import("builtin");
+const Ed25519 = std.crypto.sign.Ed25519;
+const ProgressReader = @import("ProgressReader.zig");
