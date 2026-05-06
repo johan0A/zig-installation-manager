@@ -206,6 +206,8 @@ fn fetchVersion(
         };
         try urls.append(gpa, ziglang_link);
 
+        const temp_dir: std.Io.Dir = try .createDirPathOpen(data_dir, io, "temp", .{});
+
         for (urls.items) |mirror| {
             fetchFromMirror(
                 io,
@@ -217,6 +219,7 @@ fn fetchVersion(
                 tarball_name,
                 zig_pubkey,
                 1,
+                temp_dir,
                 version_dir,
                 "zig",
             ) catch |err| {
@@ -263,6 +266,8 @@ fn fetchVersion(
             }),
         };
 
+        const temp_dir: std.Io.Dir = try .createDirPathOpen(data_dir, io, "temp", .{});
+
         try fetchFromMirror(
             io,
             gpa,
@@ -273,6 +278,7 @@ fn fetchVersion(
             tarball_name,
             zls_pubkey,
             0,
+            temp_dir,
             version_dir,
             "zls",
         );
@@ -349,6 +355,7 @@ fn fetchFromMirror(
     tarball_name: []const u8,
     minisig_pubkey: []const u8,
     strip_components: u32,
+    temp_dir: Dir,
     dir: Dir,
     sub_path: []const u8,
 ) !void {
@@ -367,9 +374,9 @@ fn fetchFromMirror(
     const tarball_url = try std.fmt.allocPrint(arena, "{s}/{s}?source=zim", .{ mirror_url, tarball_name });
 
     const temp_file_sub_path = ".tmp-" ++ std.fmt.hex(random.int(u64));
-    const temp_file = try dir.createFile(io, temp_file_sub_path, .{ .read = true });
+    const temp_file = try temp_dir.createFile(io, temp_file_sub_path, .{ .read = true });
     defer temp_file.close(io);
-    defer dir.deleteFile(io, temp_file_sub_path) catch {};
+    defer temp_dir.deleteFile(io, temp_file_sub_path) catch {};
 
     {
         const download_node = progress_node.start("download", 0);
