@@ -20,7 +20,9 @@ General options:
 ```
 Usage: zim fetch <version> [options]
 
-<version> is a semver like `0.14.1` or `master`.
+Fetch a version of Zig (and optionally ZLS) and select it
+as the active version. <version> is a semver like `0.14.1`
+or `master`.
 
 Options:
   --zls          Also fetch ZLS

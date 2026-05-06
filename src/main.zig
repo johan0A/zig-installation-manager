@@ -551,7 +551,9 @@ pub const usage =
 pub const fetch_usage =
     \\Usage: zim fetch <version> [options]
     \\
-    \\<version> is a semver like `0.14.1` or `master`.
+    \\Fetch a version of Zig (and optionally ZLS) and select it
+    \\as the active version. <version> is a semver like `0.14.1`
+    \\or `master`.
     \\
     \\Options:
     \\  --zls          Also fetch ZLS
@@ -563,7 +565,9 @@ pub const fetch_usage =
 pub const switch_usage =
     \\Usage: zim switch <version>
     \\
-    \\<version> is a semver like `0.14.1` or `master`.
+    \\Activate a previously fetched version by updating the
+    \\`bin` symlink in the zim-data directory. <version> is a
+    \\semver like `0.14.1` or `master`.
     \\
     \\Options:
     \\  -h, --help     Show this help
@@ -573,7 +577,8 @@ pub const switch_usage =
 pub const remove_usage =
     \\Usage: zim remove <version>
     \\
-    \\<version> is a semver like `0.14.1` or `master`.
+    \\Delete a locally fetched version. <version> is a semver
+    \\like `0.14.1` or `master`.
     \\
     \\Options:
     \\  -h, --help     Show this help
