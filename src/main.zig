@@ -3,6 +3,9 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const arena = init.arena.allocator();
 
+    var stdout_buf: [1024]u8 = undefined;
+    var stdout: std.Io.File.Writer = .init(.stdout(), io, &stdout_buf);
+
     var exe_path_buf: [Dir.max_path_bytes]u8 = undefined;
     const exe_path_len = try std.process.executableDirPath(io, &exe_path_buf);
     const exe_dir: Dir = try .openDirAbsolute(io, exe_path_buf[0..exe_path_len], .{ .iterate = true });
@@ -39,7 +42,7 @@ pub fn main(init: std.process.Init) !void {
             }
         }
         const v = version orelse fatal("missing version argument", .{});
-        try fetchVersion(io, arena, gpa, random, root, data_dir, v, force, zls);
+        try fetchVersion(io, arena, gpa, random, root, data_dir, try .parse(v), force, zls);
         try switchVersion(io, arena, v, data_dir);
     } else if (anyEql(command, &.{ "switch", "s" })) {
         var version: ?[]const u8 = null;
@@ -69,6 +72,16 @@ pub fn main(init: std.process.Init) !void {
         }
         const v = version orelse fatal("missing version argument", .{});
         try removeVersion(io, v, data_dir);
+    } else if (anyEql(command, &.{ "list", "ls" })) {
+        while (args.next()) |arg| {
+            if (anyEql(arg, &.{ "-h", "--help" })) {
+                std.log.info("{s}", .{remove_usage});
+                return;
+            } else if (std.mem.startsWith(u8, arg, "-")) {
+                fatal("unrecognized flag: {s}", .{arg});
+            }
+        }
+        try listVersions(io, arena, data_dir, &stdout.interface);
     } else if (anyEql(command, &.{ "h", "help", "-h", "--help" })) {
         std.log.info("{s}", .{usage});
     } else {
@@ -98,7 +111,12 @@ fn switchVersion(
     version: []const u8,
     data_dir: Dir,
 ) !void {
-    data_dir.access(io, version, .{}) catch |err| switch (err) {
+    const version_dir = data_dir.openDir(io, "versions", .{}) catch |err| switch (err) {
+        error.FileNotFound => fatal("version {s} is not fetched", .{version}),
+        else => |e| return e,
+    };
+
+    version_dir.access(io, version, .{}) catch |err| switch (err) {
         error.FileNotFound => fatal("version {s} is not fetched", .{version}),
         else => |e| return e,
     };
@@ -106,13 +124,13 @@ fn switchVersion(
     try data_dir.deleteTree(io, symlink_dir_path);
     try data_dir.createDir(io, symlink_dir_path, .default_dir);
 
-    const zig_target_path = try Dir.path.join(arena, &.{ "..", version, "zig/zig" });
+    const zig_target_path = try Dir.path.join(arena, &.{ "..", "versions", version, "zig/zig" });
     const zig_link_path = try Dir.path.join(arena, &.{ symlink_dir_path, "zig" });
     try data_dir.symLink(io, zig_target_path, zig_link_path, .{});
 
     const zls_path = try Dir.path.join(arena, &.{ version, "zls" });
-    if (try fileExists(io, data_dir, zls_path)) {
-        const zls_target_path = try Dir.path.join(arena, &.{ "..", version, "zls/zls" });
+    if (try fileExists(io, version_dir, zls_path)) {
+        const zls_target_path = try Dir.path.join(arena, &.{ "..", "versions", version, "zls/zls" });
         const zls_link_path = try Dir.path.join(arena, &.{ symlink_dir_path, "zls" });
         try data_dir.symLink(io, zls_target_path, zls_link_path, .{});
     }
@@ -120,18 +138,65 @@ fn switchVersion(
     std.log.info("active version: {s}", .{version});
 }
 
+fn listVersions(
+    io: std.Io,
+    arena: std.mem.Allocator,
+    data_dir: Dir,
+    stdout: *std.Io.Writer,
+) !void {
+    const versions_dir = data_dir.openDir(io, "versions", .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => |e| return e,
+    };
+    var versions_dir_it = versions_dir.iterate();
+    while (try versions_dir_it.next(io)) |entry| {
+        try stdout.print("{s}", .{entry.name});
+        const zls_path = try Dir.path.join(arena, &.{ entry.name, "zls" });
+        if (try fileExists(io, versions_dir, zls_path)) {
+            try stdout.print(" (+zls)", .{});
+        }
+        try stdout.writeByte('\n');
+    }
+    try stdout.flush();
+}
+
 fn removeVersion(
     io: std.Io,
     version: []const u8,
     data_dir: Dir,
 ) !void {
-    data_dir.access(io, version, .{}) catch |err| switch (err) {
+    const version_dir = data_dir.openDir(io, "versions", .{}) catch |err| switch (err) {
         error.FileNotFound => fatal("version {s} is not fetched", .{version}),
         else => |e| return e,
     };
-    try data_dir.deleteTree(io, version);
+
+    version_dir.access(io, version, .{}) catch |err| switch (err) {
+        error.FileNotFound => fatal("version {s} is not fetched", .{version}),
+        else => |e| return e,
+    };
+    try version_dir.deleteTree(io, version);
     std.log.info("removed version: {s}", .{version});
 }
+
+const VersionArg = union(enum) {
+    master: void,
+    semver: std.SemanticVersion,
+
+    fn parse(arg: []const u8) !VersionArg {
+        if (std.mem.eql(u8, arg, "master")) {
+            return .master;
+        } else {
+            return .{ .semver = try .parse(arg) };
+        }
+    }
+
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return switch (self) {
+            .master => writer.writeAll("master"),
+            .semver => |v| writer.print("{f}", .{v}),
+        };
+    }
+};
 
 fn fetchVersion(
     io: std.Io,
@@ -140,41 +205,54 @@ fn fetchVersion(
     random: std.Random,
     progress_node: std.Progress.Node,
     data_dir: Dir,
-    version_param: []const u8,
+    version_arg: VersionArg,
     force: bool,
     zls: bool,
 ) !void {
+    const version_dir = data_dir.openDir(io, "versions", .{}) catch |err| switch (err) {
+        error.FileNotFound => blk: {
+            const version_dir: Dir = try .createDirPathOpen(data_dir, io, "versions", .{});
+            // migrating old zim-data dir format
+            var data_dir_it = data_dir.iterate();
+            while (try data_dir_it.next(io)) |entry| {
+                _ = VersionArg.parse(entry.name) catch continue;
+                try data_dir.rename(entry.name, version_dir, entry.name, io);
+            }
+            break :blk version_dir;
+        },
+        else => |e| return e,
+    };
+
     const zig_version_index_body = try fetchZigIndex(io, arena, data_dir, progress_node);
-    const zig_version_index: std.json.Value = try std.json.parseFromSliceLeaky(std.json.Value, arena, zig_version_index_body, .{});
+    const zig_version_index = try std.json.parseFromSliceLeaky(std.json.Value, arena, zig_version_index_body, .{});
+    const version_name = try std.fmt.allocPrint(arena, "{f}", .{version_arg});
 
-    const version_param_is_master = std.mem.eql(u8, version_param, "master");
-
-    const zig_version: std.SemanticVersion = switch (version_param_is_master) {
-        true => blk: {
-            const master_version_str = zig_version_index.object.get("master").?.object.get("version").?.string;
+    const zig_version: std.SemanticVersion = switch (version_arg) {
+        .master => blk: {
+            const master_version_str = zig_version_index.object.get("master").?.object.get("sversion").?.string;
             break :blk try .parse(master_version_str);
         },
-        false => try .parse(version_param),
+        .semver => |v| v,
     };
 
     const zig_version_str = try std.fmt.allocPrint(arena, "{f}", .{zig_version});
 
-    var version_dir: Dir = try .createDirPathOpen(data_dir, io, version_param, .{});
-    defer version_dir.close(io);
+    var version_sub_dir: Dir = try .createDirPathOpen(version_dir, io, version_name, .{});
+    defer version_sub_dir.close(io);
 
-    const zig_already_fetched = try fileExists(io, version_dir, "zig");
+    const zig_already_fetched = try fileExists(io, version_sub_dir, "zig");
 
     if (zig_already_fetched and force) {
-        try version_dir.deleteTree(io, "zig");
-        try version_dir.deleteTree(io, "zls");
+        try version_sub_dir.deleteTree(io, "zig");
+        try version_sub_dir.deleteTree(io, "zls");
     }
 
-    const zls_already_fetched = try fileExists(io, version_dir, "zls");
+    const zls_already_fetched = try fileExists(io, version_sub_dir, "zls");
     const fetch_zig = force or !zig_already_fetched;
     const fetch_zls = zls and !zls_already_fetched;
 
     if (!fetch_zig and !fetch_zls) {
-        std.log.info("version {s} already fetched (use --force to re-fetch)", .{version_param});
+        std.log.info("version {s} already fetched (use --force to re-fetch)", .{version_name});
         return;
     }
 
@@ -200,7 +278,7 @@ fn fetchVersion(
         }
         random.shuffle([]const u8, urls.items);
 
-        const ziglang_link = switch (version_param_is_master) {
+        const ziglang_link = switch (version_arg == .master) {
             false => try std.fmt.allocPrint(arena, "https://ziglang.org/download/{s}", .{zig_version_str}),
             true => "https://ziglang.org/builds",
         };
@@ -220,13 +298,13 @@ fn fetchVersion(
                 zig_pubkey,
                 1,
                 temp_dir,
-                version_dir,
+                version_sub_dir,
                 "zig",
             ) catch |err| {
                 std.log.warn("mirror {s} failed: {s}", .{ mirror, @errorName(err) });
                 continue;
             };
-            std.log.info("fetched zig {s}", .{version_param});
+            std.log.info("fetched zig {s}", .{version_name});
             break;
         } else {
             return error.AllMirrorsFailed;
@@ -279,7 +357,7 @@ fn fetchVersion(
             zls_pubkey,
             0,
             temp_dir,
-            version_dir,
+            version_sub_dir,
             "zls",
         );
         std.log.info("fetched zls {s}", .{zls_version});
@@ -547,6 +625,7 @@ pub const usage =
     \\Commands:
     \\  fetch, f       Download a Zig version
     \\  switch, s      Select a fetched version
+    \\  list, ls       List fetched zig versions
     \\  remove, rm     Delete a fetched version
     \\  help, h        Show this message
     \\
@@ -575,6 +654,16 @@ pub const switch_usage =
     \\Activate a previously fetched version by updating the
     \\`bin` symlink in the zim-data directory. <version> is a
     \\semver like `0.14.1` or `master`.
+    \\
+    \\Options:
+    \\  -h, --help     Show this help
+    \\
+;
+
+pub const list_usage =
+    \\Usage: zim list
+    \\
+    \\List currently fetched versions of Zig and Zls
     \\
     \\Options:
     \\  -h, --help     Show this help
