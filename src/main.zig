@@ -4,16 +4,48 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
 
     var stdout_buf: [1024]u8 = undefined;
-    var stdout: std.Io.File.Writer = .init(.stdout(), io, &stdout_buf);
+    var stdout_impl: std.Io.File.Writer = .init(.stdout(), io, &stdout_buf);
+    const stdout = &stdout_impl.interface;
+    defer stdout.flush() catch {};
 
     var exe_path_buf: [Dir.max_path_bytes]u8 = undefined;
     const exe_path_len = try std.process.executableDirPath(io, &exe_path_buf);
     const exe_dir: Dir = try .openDirAbsolute(io, exe_path_buf[0..exe_path_len], .{ .iterate = true });
     const data_dir = try exe_dir.createDirPathOpen(io, "zim-data", .{ .open_options = .{ .iterate = true } });
 
-    var args = try init.minimal.args.iterateAllocator(arena);
+    var args_slice: []const []const u8 = try init.minimal.args.toSlice(arena);
+
+    const autocomplete = if (args_slice.len > 1) std.mem.eql(u8, args_slice[1], "autocomplete") else false;
+
+    var incomplete_arg: []const u8 = undefined;
+
+    if (autocomplete) {
+        const comp_line = init.environ_map.get("COMP_LINE") orelse return;
+        const comp_point_str = init.environ_map.get("COMP_POINT") orelse "0";
+        const comp_point = std.fmt.parseInt(usize, comp_point_str, 10) catch comp_line.len;
+        const line = comp_line[0..@min(comp_point, comp_line.len)];
+
+        var arglist: std.ArrayList([]const u8) = .empty;
+        var args_it = std.mem.tokenizeScalar(u8, line, ' ');
+        while (args_it.next()) |w| try arglist.append(arena, w);
+
+        const is_fresh_word = line.len == 0 or line[line.len - 1] == ' ';
+        incomplete_arg = if (is_fresh_word) "" else arglist.pop() orelse "";
+
+        args_slice = arglist.items;
+    }
+
+    const ArgsIt = struct {
+        args: []const []const u8,
+        index: usize = 0,
+        fn next(self: *@This()) ?[]const u8 {
+            if (self.index >= self.args.len) return null;
+            self.index += 1;
+            return self.args[self.index - 1];
+        }
+    };
+    var args: ArgsIt = .{ .args = args_slice };
     _ = args.next();
-    const command = args.next() orelse fatalAndPrintUsage("missing command argument", .{});
 
     const root = std.Progress.start(io, .{ .root_name = "zim" });
     defer root.end();
@@ -22,69 +54,168 @@ pub fn main(init: std.process.Init) !void {
     var prng: std.Random.DefaultPrng = .init(io_random.interface().int(u64));
     const random = prng.random();
 
-    if (anyEql(command, &.{ "fetch", "f" })) {
-        var version: ?[]const u8 = null;
-        var force = false;
-        var zls = false;
-        while (args.next()) |arg| {
-            if (anyEql(arg, &.{ "-h", "--help" })) {
-                std.log.info("{s}", .{fetch_usage});
-                return;
-            } else if (anyEql(arg, &.{"--force"})) {
-                force = true;
-            } else if (anyEql(arg, &.{"--zls"})) {
-                zls = true;
-            } else if (std.mem.startsWith(u8, arg, "-")) {
-                fatal("unrecognized flag: {s}", .{arg});
-            } else {
-                version = arg;
-            }
+    const Command = union(enum) {
+        const Version = struct { version: ?[]const u8 = null, help: bool = false };
+        const Fetch = struct { version: ?[]const u8 = null, force: bool = false, zls: bool = false, help: bool = false };
+        const List = struct { help: bool = false };
+
+        none,
+        unknown: []const u8,
+        help,
+        fetch: Fetch,
+        @"switch": Version,
+        remove: Version,
+        list: List,
+    };
+
+    const CommandTag = @typeInfo(Command).@"union".tag_type.?;
+    const command_map: std.StaticStringMap(CommandTag) = .initComptime(.{
+        .{ "fetch", .fetch },      .{ "f", .fetch },
+        .{ "switch", .@"switch" }, .{ "s", .@"switch" },
+        .{ "remove", .remove },    .{ "rm", .remove },
+        .{ "list", .list },        .{ "ls", .list },
+        .{ "help", .help },        .{ "h", .help },
+        .{ "--help", .help },      .{ "-h", .help },
+    });
+
+    const action: Command = blk: {
+        const command_str = args.next() orelse break :blk .none;
+        const command = command_map.get(command_str) orelse break :blk .{ .unknown = command_str };
+        switch (command) {
+            .help => break :blk .help,
+            .fetch => {
+                var fetch: Command.Fetch = .{};
+                while (args.next()) |arg| {
+                    if (anyEql(arg, &.{ "-h", "--help" })) {
+                        fetch.help = true;
+                    } else if (anyEql(arg, &.{"--force"})) {
+                        fetch.force = true;
+                    } else if (anyEql(arg, &.{"--zls"})) {
+                        fetch.zls = true;
+                    } else if (std.mem.startsWith(u8, arg, "-")) {
+                        if (!autocomplete) fatal("unrecognized flag: {s}", .{arg});
+                    } else {
+                        fetch.version = arg;
+                    }
+                }
+                break :blk .{ .fetch = fetch };
+            },
+            .@"switch" => {
+                var @"switch": Command.Version = .{};
+                while (args.next()) |arg| {
+                    if (anyEql(arg, &.{ "-h", "--help" })) {
+                        @"switch".help = true;
+                    } else if (std.mem.startsWith(u8, arg, "-")) {
+                        if (!autocomplete) fatal("unrecognized flag: {s}", .{arg});
+                    } else {
+                        @"switch".version = arg;
+                    }
+                }
+                break :blk .{ .@"switch" = @"switch" };
+            },
+            .remove => {
+                var remove: Command.Version = .{};
+                while (args.next()) |arg| {
+                    if (anyEql(arg, &.{ "-h", "--help" })) {
+                        remove.help = true;
+                    } else if (std.mem.startsWith(u8, arg, "-")) {
+                        if (!autocomplete) fatal("unrecognized flag: {s}", .{arg});
+                    } else {
+                        remove.version = arg;
+                    }
+                }
+                break :blk .{ .remove = remove };
+            },
+            .list => {
+                var list: Command.List = .{};
+                while (args.next()) |arg| {
+                    if (anyEql(arg, &.{ "-h", "--help" })) {
+                        list.help = true;
+                    } else if (std.mem.startsWith(u8, arg, "-")) {
+                        if (!autocomplete) fatal("unrecognized flag: {s}", .{arg});
+                    }
+                }
+                break :blk .{ .list = list };
+            },
+            .unknown, .none => unreachable,
         }
-        const v = version orelse fatal("missing version argument", .{});
-        try fetchVersion(io, arena, gpa, random, root, data_dir, try .parse(v), force, zls);
-        try switchVersion(io, arena, v, data_dir);
-    } else if (anyEql(command, &.{ "switch", "s" })) {
-        var version: ?[]const u8 = null;
-        while (args.next()) |arg| {
-            if (anyEql(arg, &.{ "-h", "--help" })) {
-                std.log.info("{s}", .{switch_usage});
-                return;
-            } else if (std.mem.startsWith(u8, arg, "-")) {
-                fatal("unrecognized flag: {s}", .{arg});
-            } else {
-                version = arg;
-            }
+    };
+
+    if (!autocomplete) {
+        switch (action) {
+            .none => fatalAndPrintUsage("missing command argument", .{}),
+            .unknown => |name| fatalAndPrintUsage("invalid command: {s}", .{name}),
+            .help => std.log.info("{s}", .{usage}),
+            .fetch => |a| {
+                if (a.help) {
+                    std.log.info("{s}", .{fetch_usage});
+                    return;
+                }
+                const v = a.version orelse fatal("missing version argument", .{});
+                try fetchVersion(io, arena, gpa, random, root, data_dir, try .parse(v), a.force, a.zls);
+                try switchVersion(io, arena, v, data_dir);
+            },
+            .@"switch" => |a| {
+                if (a.help) {
+                    std.log.info("{s}", .{switch_usage});
+                    return;
+                }
+                const v = a.version orelse fatal("missing version argument", .{});
+                try switchVersion(io, arena, v, data_dir);
+            },
+            .remove => |a| {
+                if (a.help) {
+                    std.log.info("{s}", .{remove_usage});
+                    return;
+                }
+                const v = a.version orelse fatal("missing version argument", .{});
+                try removeVersion(io, v, data_dir);
+            },
+            .list => |a| {
+                if (a.help) {
+                    std.log.info("{s}", .{list_usage});
+                    return;
+                }
+                try listVersions(io, arena, data_dir, stdout);
+            },
         }
-        const v = version orelse fatal("missing version argument", .{});
-        try switchVersion(io, arena, v, data_dir);
-    } else if (anyEql(command, &.{ "remove", "rm" })) {
-        var version: ?[]const u8 = null;
-        while (args.next()) |arg| {
-            if (anyEql(arg, &.{ "-h", "--help" })) {
-                std.log.info("{s}", .{remove_usage});
-                return;
-            } else if (std.mem.startsWith(u8, arg, "-")) {
-                fatal("unrecognized flag: {s}", .{arg});
-            } else {
-                version = arg;
-            }
-        }
-        const v = version orelse fatal("missing version argument", .{});
-        try removeVersion(io, v, data_dir);
-    } else if (anyEql(command, &.{ "list", "ls" })) {
-        while (args.next()) |arg| {
-            if (anyEql(arg, &.{ "-h", "--help" })) {
-                std.log.info("{s}", .{remove_usage});
-                return;
-            } else if (std.mem.startsWith(u8, arg, "-")) {
-                fatal("unrecognized flag: {s}", .{arg});
-            }
-        }
-        try listVersions(io, arena, data_dir, &stdout.interface);
-    } else if (anyEql(command, &.{ "h", "help", "-h", "--help" })) {
-        std.log.info("{s}", .{usage});
     } else {
-        fatalAndPrintUsage("invalid command: {s}", .{command});
+        const local = struct {
+            fn complete(out: *std.Io.Writer, prefix: []const u8, name: []const u8, already_given: bool) void {
+                if (already_given) return;
+                if (!std.mem.startsWith(u8, name, prefix)) return;
+                out.print("{s}\n", .{name}) catch {};
+            }
+        };
+        switch (action) {
+            .none => {
+                for (command_map.keys()) |key|
+                    local.complete(stdout, incomplete_arg, key, false);
+            },
+            .unknown, .help => {},
+            .fetch => |a| {
+                local.complete(stdout, incomplete_arg, "--help", a.help);
+                local.complete(stdout, incomplete_arg, "-h", a.help);
+                local.complete(stdout, incomplete_arg, "--force", a.force);
+                local.complete(stdout, incomplete_arg, "--zls", a.zls);
+                // TODO: complete versions
+            },
+            .@"switch", .remove => |a| {
+                local.complete(stdout, incomplete_arg, "--help", a.help);
+                local.complete(stdout, incomplete_arg, "-h", a.help);
+                if (a.version == null) {
+                    const versions_dir = openVersionsDir(io, data_dir) catch return;
+                    var dir_it = versions_dir.iterate();
+                    while (dir_it.next(io) catch return) |entry|
+                        if (std.mem.startsWith(u8, entry.name, incomplete_arg))
+                            stdout.print("{s}\n", .{entry.name}) catch return;
+                }
+            },
+            .list => |a| {
+                local.complete(stdout, incomplete_arg, "--help", a.help);
+                local.complete(stdout, incomplete_arg, "-h", a.help);
+            },
+        }
     }
 }
 
@@ -105,9 +236,11 @@ fn fatalAndPrintUsage(comptime fmt: []const u8, args: anytype) noreturn {
 }
 
 fn openVersionsDir(io: std.Io, data_dir: Dir) !Dir {
-    return data_dir.openDir(io, "versions", .{}) catch |err| switch (err) {
+    return data_dir.openDir(io, "versions", .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => blk: {
-            const versions_dir: Dir = try .createDirPathOpen(data_dir, io, "versions", .{});
+            const versions_dir: Dir = try .createDirPathOpen(data_dir, io, "versions", .{
+                .open_options = .{ .iterate = true },
+            });
             // migrating old zim-data dir format
             var data_dir_it = data_dir.iterate();
             while (try data_dir_it.next(io)) |entry| {

@@ -50,3 +50,25 @@ export PATH="/path/to/zim-data/bin:$PATH"
 
 The `zim-data` directory is created next to the `zim` executable and holds all
 fetched versions and the active symlinks.
+
+## Autocomplete
+
+Zim ships with a built-in completion provider. Add the appropriate line to your
+shell's startup file.
+
+### Bash
+
+```sh
+complete -C 'zim autocomplete' zim
+```
+
+Add it to `~/.bashrc` (Linux) or `~/.bash_profile` (macOS).
+
+### Zsh
+
+```sh
+autoload -U +X bashcompinit && bashcompinit
+complete -C 'zim autocomplete' zim
+```
+
+Add it to `~/.zshrc`. This is the right setup for the default shell on macOS.
