@@ -5,12 +5,13 @@ Zim is a cli tool to download and manages multiple versions of zig and zls.
 > Zim is currently incompatible with Windows
 
 ```
-Usage: zim <command> [args]
+info: Usage: zim <command> [args]
 
 Commands:
-  fetch, f       Download a Zig version
-  switch, s      Select a fetched version
-  remove, rm     Delete a fetched version
+  install, i     Download a Zig version
+  use, u         Select an installed version
+  list, ls       List installed zig versions
+  remove, rm     Delete a installed version
   help, h        Show this message
 
 General options:
@@ -18,22 +19,22 @@ General options:
 ```
 
 ```
-Usage: zim fetch <version> [options]
+Usage: zim install <version> [options]
 
 Fetch a version of Zig (and optionally ZLS) and select it
 as the active version. <version> is a semver like `0.14.1`
 or `master`.
 
 Options:
-  --zls          Also fetch ZLS
-  --force        Re-fetch if already present
+  --zls          Also install ZLS
+  --force        Re-install if already present
   -h, --help     Show this help
 ```
 
 ```
 > zim f 0.16.0 --zls
 [3] zim
-├─ fetching zig-x86_64-linux-0.16.0.tar.xz from https://zig-mirror.tsimnet.eu/zig
+├─ installing zig-x86_64-linux-0.16.0.tar.xz from https://zig-mirror.tsimnet.eu/zig
 └─ [84/100] extract
 ```
 

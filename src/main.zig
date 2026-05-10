@@ -15,11 +15,11 @@ pub fn main(init: std.process.Init) !void {
 
     var args_slice: []const []const u8 = try init.minimal.args.toSlice(arena);
 
-    const autocomplete = if (args_slice.len > 1) std.mem.eql(u8, args_slice[1], "autocomplete") else false;
+    const completion = if (args_slice.len > 1) std.mem.eql(u8, args_slice[1], "bash-complete") else false;
 
     var incomplete_arg: []const u8 = undefined;
 
-    if (autocomplete) {
+    if (completion) {
         const comp_line = init.environ_map.get("COMP_LINE") orelse return;
         const comp_point_str = init.environ_map.get("COMP_POINT") orelse "0";
         const comp_point = std.fmt.parseInt(usize, comp_point_str, 10) catch comp_line.len;
@@ -62,56 +62,56 @@ pub fn main(init: std.process.Init) !void {
         none,
         unknown: []const u8,
         help,
-        fetch: Fetch,
-        @"switch": Version,
+        install: Fetch,
+        use: Version,
         remove: Version,
         list: List,
     };
 
     const CommandTag = @typeInfo(Command).@"union".tag_type.?;
     const command_map: std.StaticStringMap(CommandTag) = .initComptime(.{
-        .{ "fetch", .fetch },      .{ "f", .fetch },
-        .{ "switch", .@"switch" }, .{ "s", .@"switch" },
-        .{ "remove", .remove },    .{ "rm", .remove },
-        .{ "list", .list },        .{ "ls", .list },
-        .{ "help", .help },        .{ "h", .help },
-        .{ "--help", .help },      .{ "-h", .help },
+        .{ "install", .install }, .{ "i", .install },
+        .{ "use", .use },         .{ "u", .use },
+        .{ "remove", .remove },   .{ "rm", .remove },
+        .{ "list", .list },       .{ "ls", .list },
+        .{ "help", .help },       .{ "h", .help },
+        .{ "--help", .help },     .{ "-h", .help },
     });
 
-    const action: Command = blk: {
+    const command: Command = blk: {
         const command_str = args.next() orelse break :blk .none;
         const command = command_map.get(command_str) orelse break :blk .{ .unknown = command_str };
         switch (command) {
             .help => break :blk .help,
-            .fetch => {
-                var fetch: Command.Fetch = .{};
+            .install => {
+                var install: Command.Fetch = .{};
                 while (args.next()) |arg| {
                     if (anyEql(arg, &.{ "-h", "--help" })) {
-                        fetch.help = true;
+                        install.help = true;
                     } else if (anyEql(arg, &.{"--force"})) {
-                        fetch.force = true;
+                        install.force = true;
                     } else if (anyEql(arg, &.{"--zls"})) {
-                        fetch.zls = true;
+                        install.zls = true;
                     } else if (std.mem.startsWith(u8, arg, "-")) {
-                        if (!autocomplete) fatal("unrecognized flag: {s}", .{arg});
+                        if (!completion) fatal("unrecognized flag: {s}", .{arg});
                     } else {
-                        fetch.version = arg;
+                        install.version = arg;
                     }
                 }
-                break :blk .{ .fetch = fetch };
+                break :blk .{ .install = install };
             },
-            .@"switch" => {
-                var @"switch": Command.Version = .{};
+            .use => {
+                var use: Command.Version = .{};
                 while (args.next()) |arg| {
                     if (anyEql(arg, &.{ "-h", "--help" })) {
-                        @"switch".help = true;
+                        use.help = true;
                     } else if (std.mem.startsWith(u8, arg, "-")) {
-                        if (!autocomplete) fatal("unrecognized flag: {s}", .{arg});
+                        if (!completion) fatal("unrecognized flag: {s}", .{arg});
                     } else {
-                        @"switch".version = arg;
+                        use.version = arg;
                     }
                 }
-                break :blk .{ .@"switch" = @"switch" };
+                break :blk .{ .use = use };
             },
             .remove => {
                 var remove: Command.Version = .{};
@@ -119,7 +119,7 @@ pub fn main(init: std.process.Init) !void {
                     if (anyEql(arg, &.{ "-h", "--help" })) {
                         remove.help = true;
                     } else if (std.mem.startsWith(u8, arg, "-")) {
-                        if (!autocomplete) fatal("unrecognized flag: {s}", .{arg});
+                        if (!completion) fatal("unrecognized flag: {s}", .{arg});
                     } else {
                         remove.version = arg;
                     }
@@ -132,7 +132,7 @@ pub fn main(init: std.process.Init) !void {
                     if (anyEql(arg, &.{ "-h", "--help" })) {
                         list.help = true;
                     } else if (std.mem.startsWith(u8, arg, "-")) {
-                        if (!autocomplete) fatal("unrecognized flag: {s}", .{arg});
+                        if (!completion) fatal("unrecognized flag: {s}", .{arg});
                     }
                 }
                 break :blk .{ .list = list };
@@ -141,38 +141,38 @@ pub fn main(init: std.process.Init) !void {
         }
     };
 
-    if (!autocomplete) {
-        switch (action) {
+    if (!completion) {
+        switch (command) {
             .none => fatalAndPrintUsage("missing command argument", .{}),
             .unknown => |name| fatalAndPrintUsage("invalid command: {s}", .{name}),
             .help => std.log.info("{s}", .{usage}),
-            .fetch => |a| {
-                if (a.help) {
-                    std.log.info("{s}", .{fetch_usage});
+            .install => |c| {
+                if (c.help) {
+                    std.log.info("{s}", .{install_usage});
                     return;
                 }
-                const v = a.version orelse fatal("missing version argument", .{});
-                try fetchVersion(io, arena, gpa, random, root, data_dir, try .parse(v), a.force, a.zls);
-                try switchVersion(io, arena, v, data_dir);
+                const v = c.version orelse fatal("missing version argument", .{});
+                try installVersion(io, arena, gpa, random, root, data_dir, try .parse(v), c.force, c.zls);
+                try useVersion(io, arena, v, data_dir);
             },
-            .@"switch" => |a| {
-                if (a.help) {
-                    std.log.info("{s}", .{switch_usage});
+            .use => |c| {
+                if (c.help) {
+                    std.log.info("{s}", .{use_usage});
                     return;
                 }
-                const v = a.version orelse fatal("missing version argument", .{});
-                try switchVersion(io, arena, v, data_dir);
+                const v = c.version orelse fatal("missing version argument", .{});
+                try useVersion(io, arena, v, data_dir);
             },
-            .remove => |a| {
-                if (a.help) {
+            .remove => |c| {
+                if (c.help) {
                     std.log.info("{s}", .{remove_usage});
                     return;
                 }
-                const v = a.version orelse fatal("missing version argument", .{});
+                const v = c.version orelse fatal("missing version argument", .{});
                 try removeVersion(io, v, data_dir);
             },
-            .list => |a| {
-                if (a.help) {
+            .list => |c| {
+                if (c.help) {
                     std.log.info("{s}", .{list_usage});
                     return;
                 }
@@ -187,23 +187,23 @@ pub fn main(init: std.process.Init) !void {
                 out.print("{s}\n", .{name}) catch {};
             }
         };
-        switch (action) {
+        switch (command) {
             .none => {
                 for (command_map.keys()) |key|
                     local.complete(stdout, incomplete_arg, key, false);
             },
             .unknown, .help => {},
-            .fetch => |a| {
-                local.complete(stdout, incomplete_arg, "--help", a.help);
-                local.complete(stdout, incomplete_arg, "-h", a.help);
-                local.complete(stdout, incomplete_arg, "--force", a.force);
-                local.complete(stdout, incomplete_arg, "--zls", a.zls);
+            .install => |c| {
+                local.complete(stdout, incomplete_arg, "--help", c.help);
+                local.complete(stdout, incomplete_arg, "-h", c.help);
+                local.complete(stdout, incomplete_arg, "--force", c.force);
+                local.complete(stdout, incomplete_arg, "--zls", c.zls);
                 // TODO: complete versions
             },
-            .@"switch", .remove => |a| {
-                local.complete(stdout, incomplete_arg, "--help", a.help);
-                local.complete(stdout, incomplete_arg, "-h", a.help);
-                if (a.version == null) {
+            .use, .remove => |c| {
+                local.complete(stdout, incomplete_arg, "--help", c.help);
+                local.complete(stdout, incomplete_arg, "-h", c.help);
+                if (c.version == null) {
                     const versions_dir = openVersionsDir(io, data_dir) catch return;
                     var dir_it = versions_dir.iterate();
                     while (dir_it.next(io) catch return) |entry|
@@ -211,9 +211,9 @@ pub fn main(init: std.process.Init) !void {
                             stdout.print("{s}\n", .{entry.name}) catch return;
                 }
             },
-            .list => |a| {
-                local.complete(stdout, incomplete_arg, "--help", a.help);
-                local.complete(stdout, incomplete_arg, "-h", a.help);
+            .list => |c| {
+                local.complete(stdout, incomplete_arg, "--help", c.help);
+                local.complete(stdout, incomplete_arg, "-h", c.help);
             },
         }
     }
@@ -253,14 +253,14 @@ fn openVersionsDir(io: std.Io, data_dir: Dir) !Dir {
     };
 }
 
-fn switchVersion(
+fn useVersion(
     io: std.Io,
     arena: std.mem.Allocator,
     version: []const u8,
     data_dir: Dir,
 ) !void {
     const versions_dir = try openVersionsDir(io, data_dir);
-    if (!try fileExists(io, versions_dir, version)) fatal("version {s} is not fetched", .{version});
+    if (!try fileExists(io, versions_dir, version)) fatal("version {s} is not installed", .{version});
 
     const symlink_dir = try data_dir.createDirPathOpen(io, symlink_dir_path, .{});
     for ([_][]const u8{ "zig", "zls" }) |path| {
@@ -308,7 +308,7 @@ fn removeVersion(
 ) !void {
     const versions_dir = try openVersionsDir(io, data_dir);
     versions_dir.access(io, version, .{}) catch |err| switch (err) {
-        error.FileNotFound => fatal("version {s} is not fetched", .{version}),
+        error.FileNotFound => fatal("version {s} is not installed", .{version}),
         else => |e| return e,
     };
     try versions_dir.deleteTree(io, version);
@@ -334,7 +334,7 @@ const VersionArg = union(enum) {
     }
 };
 
-fn fetchVersion(
+fn installVersion(
     io: std.Io,
     arena: std.mem.Allocator,
     gpa: std.mem.Allocator,
@@ -364,19 +364,19 @@ fn fetchVersion(
     var version_sub_dir: Dir = try .createDirPathOpen(versions_dir, io, version_name, .{});
     defer version_sub_dir.close(io);
 
-    const zig_already_fetched = try fileExists(io, version_sub_dir, "zig");
+    const zig_already_installed = try fileExists(io, version_sub_dir, "zig");
 
-    if (zig_already_fetched and force) {
+    if (zig_already_installed and force) {
         try version_sub_dir.deleteTree(io, "zig");
         try version_sub_dir.deleteTree(io, "zls");
     }
 
-    const zls_already_fetched = try fileExists(io, version_sub_dir, "zls");
-    const fetch_zig = force or !zig_already_fetched;
-    const fetch_zls = zls and !zls_already_fetched;
+    const zls_already_installed = try fileExists(io, version_sub_dir, "zls");
+    const fetch_zig = force or !zig_already_installed;
+    const fetch_zls = zls and !zls_already_installed;
 
     if (!fetch_zig and !fetch_zls) {
-        std.log.info("version {s} already fetched (use --force to re-fetch)", .{version_name});
+        std.log.info("version {s} already installed (use --force to re-install)", .{version_name});
         return;
     }
 
@@ -428,7 +428,7 @@ fn fetchVersion(
                 std.log.warn("mirror {s} failed: {s}", .{ mirror, @errorName(err) });
                 continue;
             };
-            std.log.info("fetched zig {s}", .{version_name});
+            std.log.info("installed zig {s}", .{version_name});
             break;
         } else {
             return error.AllMirrorsFailed;
@@ -484,7 +484,7 @@ fn fetchVersion(
             version_sub_dir,
             "zls",
         );
-        std.log.info("fetched zls {s}", .{zls_version});
+        std.log.info("installed zls {s}", .{zls_version});
     }
 }
 
@@ -516,7 +516,7 @@ fn fetchMirrors(
         return body;
     }) catch {
         const body = try data_dir.readFileAlloc(io, zig_mirrors_cache_path, gpa, .unlimited);
-        std.log.warn("failed to fetch mirror list, using cached list instead", .{});
+        std.log.warn("failed to install mirror list, using cached list instead", .{});
         return body;
     };
 }
@@ -561,7 +561,7 @@ fn fetchFromMirror(
     dir: Dir,
     sub_path: []const u8,
 ) !void {
-    const mirror_node = progress_node.startFmt(0, "fetching {s} from {s}", .{ tarball_name, mirror_url });
+    const mirror_node = progress_node.startFmt(0, "installing {s} from {s}", .{ tarball_name, mirror_url });
     defer mirror_node.end();
 
     const signature_url = try std.fmt.allocPrint(arena, "{s}/{s}.minisig?source=zim", .{ mirror_url, tarball_name });
@@ -747,10 +747,10 @@ pub const usage =
     \\Usage: zim <command> [args]
     \\
     \\Commands:
-    \\  fetch, f       Download a Zig version
-    \\  switch, s      Select a fetched version
-    \\  list, ls       List fetched zig versions
-    \\  remove, rm     Delete a fetched version
+    \\  install, i     Download a Zig version
+    \\  use, u         Select an installed version
+    \\  list, ls       List installed zig versions
+    \\  remove, rm     Delete a installed version
     \\  help, h        Show this message
     \\
     \\General options:
@@ -758,24 +758,24 @@ pub const usage =
     \\
 ;
 
-pub const fetch_usage =
-    \\Usage: zim fetch <version> [options]
+pub const install_usage =
+    \\Usage: zim install <version> [options]
     \\
     \\Fetch a version of Zig (and optionally ZLS) and select it
     \\as the active version. <version> is a semver like `0.14.1`
     \\or `master`.
     \\
     \\Options:
-    \\  --zls          Also fetch ZLS
-    \\  --force        Re-fetch if already present
+    \\  --zls          Also install ZLS
+    \\  --force        Re-install if already present
     \\  -h, --help     Show this help
     \\
 ;
 
-pub const switch_usage =
-    \\Usage: zim switch <version>
+pub const use_usage =
+    \\Usage: zim use <version>
     \\
-    \\Activate a previously fetched version by updating the
+    \\Activate a previously installed version by updating the
     \\`bin` symlink in the zim-data directory. <version> is a
     \\semver like `0.14.1` or `master`.
     \\
@@ -787,7 +787,7 @@ pub const switch_usage =
 pub const list_usage =
     \\Usage: zim list
     \\
-    \\List currently fetched versions of Zig and Zls
+    \\List currently installed versions of Zig and Zls
     \\
     \\Options:
     \\  -h, --help     Show this help
@@ -797,7 +797,7 @@ pub const list_usage =
 pub const remove_usage =
     \\Usage: zim remove <version>
     \\
-    \\Delete a locally fetched version. <version> is a semver
+    \\Delete a locally installed version. <version> is a semver
     \\like `0.14.1` or `master`.
     \\
     \\Options:
