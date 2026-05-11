@@ -352,7 +352,7 @@ fn installVersion(
 
     const zig_version: std.SemanticVersion = switch (version_arg) {
         .master => blk: {
-            const master_version_str = zig_version_index.object.get("master").?.object.get("sversion").?.string;
+            const master_version_str = zig_version_index.object.get("master").?.object.get("version").?.string;
             break :blk try .parse(master_version_str);
         },
         .semver => |v| v,
