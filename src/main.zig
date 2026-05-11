@@ -47,8 +47,8 @@ pub fn main(init: std.process.Init) !void {
     var args: ArgsIt = .{ .args = args_slice };
     _ = args.next();
 
-    const root = std.Progress.start(io, .{ .root_name = "zim" });
-    defer root.end();
+    const progress_root = std.Progress.start(io, .{ .root_name = "zim" });
+    defer progress_root.end();
 
     var io_random: std.Random.IoSource = .{ .io = io };
     var prng: std.Random.DefaultPrng = .init(io_random.interface().int(u64));
@@ -152,7 +152,7 @@ pub fn main(init: std.process.Init) !void {
                     return;
                 }
                 const v = c.version orelse fatal("missing version argument", .{});
-                try installVersion(io, arena, gpa, random, root, data_dir, try .parse(v), c.force, c.zls);
+                try installVersion(io, arena, gpa, random, progress_root, data_dir, try .parse(v), c.force, c.zls);
                 try useVersion(io, arena, v, data_dir);
             },
             .use => |c| {
@@ -443,12 +443,12 @@ fn installVersion(
             .{zig_version_encoded},
         );
 
-        var http: HttpGet = undefined;
         var transfer_buf: [8 * 1024]u8 = undefined;
-        const select_version_stream = try http.init(io, gpa, url, &transfer_buf);
-        defer http.deinit();
+        var select_version_get: HttpGet = undefined;
+        const select_version_get_reader = try select_version_get.init(io, arena, url, &transfer_buf);
+        defer select_version_get.deinit();
 
-        var json_tokenizer: std.json.Reader = .init(arena, select_version_stream);
+        var json_tokenizer: std.json.Reader = .init(arena, select_version_get_reader);
         const select_version = try std.json.parseFromTokenSourceLeaky(std.json.Value, arena, &json_tokenizer, .{});
 
         if (select_version.object.get("code")) |code| {
@@ -589,7 +589,7 @@ fn fetchFromMirror(
         const get_reader = try get.init(io, gpa, tarball_url, &transfer_buf);
         defer get.deinit();
 
-        var progress_reader: ProgressReader = .init(get_reader, download_node, get.content_length, &.{});
+        var progress_reader: ProgressReader = .init(get_reader, download_node, get.response.head.content_length, &.{});
 
         var blake2: std.crypto.hash.blake2.Blake2b512 = .init(.{});
         var hash_buf: [1024 * 8]u8 = undefined;
@@ -676,48 +676,31 @@ fn verifyMinisig(
 }
 
 const HttpGet = struct {
-    http_client: std.http.Client,
+    client: std.http.Client,
     request: std.http.Client.Request,
+    response: std.http.Client.Response,
     decompress: std.http.Decompress,
-    decompress_buf: [std.compress.flate.max_window_len]u8,
-    content_length: ?u64,
 
-    fn init(
-        self: *HttpGet,
-        io: std.Io,
-        gpa: std.mem.Allocator,
-        url: []const u8,
-        transfer_buf: []u8,
-    ) !*std.Io.Reader {
-        self.http_client = .{ .allocator = gpa, .io = io };
-        errdefer self.http_client.deinit();
+    fn init(self: *HttpGet, io: std.Io, arena: std.mem.Allocator, url: []const u8, transfer_buffer: []u8) !*std.Io.Reader {
+        self.client = .{ .allocator = arena, .io = io };
+        errdefer self.client.deinit();
 
-        self.request = try self.http_client.request(.GET, try .parse(url), .{});
+        self.request = try self.client.request(.GET, try .parse(url), .{});
         errdefer self.request.deinit();
         try self.request.sendBodiless();
 
         var redirect_buf: [8000]u8 = undefined;
-        var response = try self.request.receiveHead(&redirect_buf);
-        self.content_length = response.head.content_length;
+        self.response = try self.request.receiveHead(&redirect_buf);
 
-        switch (response.head.status.class()) {
+        const decompress_buffer = try arena.alloc(u8, self.response.head.content_encoding.minBufferCapacity());
+
+        switch (self.response.head.status.class()) {
             .success => {},
             else => |class| {
-                const body_reader = response.readerDecompressing(
-                    transfer_buf,
-                    &self.decompress,
-                    &self.decompress_buf,
-                );
-                // Read up to some sane limit
-                const msg = body_reader.allocRemaining(gpa, .limited(8 * 1024)) catch "";
-                defer if (msg.len != 0) gpa.free(msg);
-
-                std.log.err("HTTP {d} {s}: {s}", .{
-                    @intFromEnum(response.head.status),
-                    response.head.status.phrase() orelse "",
-                    msg,
+                std.log.err("HTTP {d} {s}", .{
+                    @intFromEnum(self.response.head.status),
+                    self.response.head.status.phrase() orelse "",
                 });
-
                 return switch (class) {
                     .informational => error.HttpInformational,
                     .redirect => error.HttpRedirect,
@@ -728,16 +711,16 @@ const HttpGet = struct {
             },
         }
 
-        return response.readerDecompressing(
-            transfer_buf,
+        return self.response.readerDecompressing(
+            transfer_buffer,
             &self.decompress,
-            &self.decompress_buf,
+            decompress_buffer,
         );
     }
 
     fn deinit(self: *HttpGet) void {
         self.request.deinit();
-        self.http_client.deinit();
+        self.client.deinit();
     }
 };
 
