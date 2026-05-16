@@ -390,34 +390,25 @@ fn installVersion(
             }),
         };
 
-        const mirrors_body = try fetchMirrors(io, arena, data_dir, progress_node);
-
-        var urls: std.ArrayList([]const u8) = .empty;
-        defer urls.deinit(gpa);
-
-        var lines = std.mem.splitScalar(u8, mirrors_body, '\n');
-        while (lines.next()) |line| {
-            const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
-            if (trimmed.len != 0) try urls.append(gpa, trimmed);
-        }
-        random.shuffle([]const u8, urls.items);
-
-        const ziglang_link = switch (version_arg == .master) {
-            false => try std.fmt.allocPrint(arena, "https://ziglang.org/download/{s}", .{zig_version_str}),
-            true => "https://ziglang.org/builds",
-        };
-        try urls.append(gpa, ziglang_link);
+        const mirrors = try fetchMirrors(io, arena, data_dir, version_arg, zig_version_str, progress_node);
+        std.mem.sortUnstable(Mirror, mirrors, {}, struct {
+            fn f(_: void, lhs: Mirror, rhs: Mirror) bool {
+                const lhs_int = if (lhs.ping) |p| p.nanoseconds else std.math.maxInt(i96);
+                const rhs_int = if (rhs.ping) |p| p.nanoseconds else std.math.maxInt(i96);
+                return lhs_int < rhs_int;
+            }
+        }.f);
 
         const temp_dir: std.Io.Dir = try .createDirPathOpen(data_dir, io, "temp", .{});
 
-        for (urls.items) |mirror| {
+        for (mirrors) |mirror| {
             fetchFromMirror(
                 io,
                 gpa,
                 arena,
                 random,
                 progress_node,
-                mirror,
+                mirror.url,
                 tarball_name,
                 zig_pubkey,
                 1,
@@ -425,7 +416,7 @@ fn installVersion(
                 version_sub_dir,
                 "zig",
             ) catch |err| {
-                std.log.warn("mirror {s} failed: {s}", .{ mirror, @errorName(err) });
+                std.log.warn("mirror {s} failed: {s}", .{ mirror.url, @errorName(err) });
                 continue;
             };
             std.log.info("installed zig {s}", .{version_name});
@@ -495,35 +486,143 @@ fn fileExists(io: std.Io, dir: Dir, sub_path: []const u8) !bool {
     };
 }
 
+const Mirror = struct {
+    ping: ?std.Io.Duration,
+    url: []const u8,
+};
+
 fn fetchMirrors(
     io: std.Io,
-    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
     data_dir: Dir,
+    version_arg: VersionArg,
+    zig_version_str: []const u8,
     progress_node: std.Progress.Node,
-) ![]u8 {
+) ![]Mirror {
     const node = progress_node.start("fetching mirrors list", 0);
     defer node.end();
 
-    (b: {
+    const MirrorFile = struct {
+        time: std.Io.Timestamp,
+        mirros: []Mirror,
+    };
+
+    const cache_file = blk: {
+        const cache_file_handle = data_dir.openFile(io, zig_mirrors_cache_path, .{ .mode = .read_write }) catch |err| switch (err) {
+            error.FileNotFound => break :blk null,
+            else => |e| return e,
+        };
+
+        var cache_file_reader_buf: [1024]u8 = undefined;
+        var cache_file_reader = cache_file_handle.reader(io, &cache_file_reader_buf);
+
+        var json_tokenizer: std.json.Reader = .init(arena, &cache_file_reader.interface);
+        const cache_file = std.json.parseFromTokenSourceLeaky(MirrorFile, arena, &json_tokenizer, .{}) catch {
+            break :blk null;
+        };
+
+        if (@abs(cache_file.time.untilNow(io, .real).toSeconds()) < 60 * 60 * 24) {
+            return cache_file.mirros;
+        }
+
+        break :blk cache_file;
+    };
+
+    const body = (b: {
         var get: HttpGet = undefined;
         var buf: [1024 * 8]u8 = undefined;
-        const reader = get.init(io, gpa, zig_mirrors_url, &buf) catch |e| break :b e;
+        const reader = get.init(io, arena, zig_mirrors_url, &buf) catch |e| break :b e;
         defer get.deinit();
-
-        const body = reader.allocRemaining(gpa, .unlimited) catch |e| break :b e;
-
-        data_dir.writeFile(io, .{ .sub_path = zig_mirrors_cache_path, .data = body }) catch {};
-        return body;
-    }) catch {
-        const body = try data_dir.readFileAlloc(io, zig_mirrors_cache_path, gpa, .unlimited);
-        std.log.warn("failed to install mirror list, using cached list instead", .{});
-        return body;
+        break :b reader.allocRemaining(arena, .unlimited);
+    }) catch |err| {
+        if (cache_file) |c| {
+            std.log.warn("failed to fetch mirror list, using cached list instead", .{});
+            return c.mirros;
+        }
+        return err;
     };
+
+    var mirrors: std.ArrayList(Mirror) = .empty;
+
+    var lines = std.mem.splitScalar(u8, body, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
+        _ = std.Uri.parse(trimmed) catch continue;
+        try mirrors.append(arena, .{ .ping = null, .url = trimmed });
+    }
+
+    const ziglang_url = switch (version_arg == .master) {
+        false => try std.fmt.allocPrint(arena, "https://ziglang.org/download/{s}", .{zig_version_str}),
+        true => "https://ziglang.org/builds",
+    };
+    try mirrors.append(arena, .{ .ping = null, .url = ziglang_url });
+
+    var ping_group: std.Io.Group = .init;
+    errdefer ping_group.cancel(io);
+    for (mirrors.items) |*mirror| {
+        ping_group.async(io, struct {
+            fn f(i: std.Io, m: *Mirror) void {
+                m.ping = pingUrl(i, m.url) catch null;
+            }
+        }.f, .{ io, mirror });
+    }
+
+    try ping_group.await(io);
+
+    const cache_file_handle = try data_dir.createFile(io, zig_mirrors_cache_path, .{ .read = true });
+    var cache_file_writer_buf: [1024]u8 = undefined;
+    var cache_file_writer = cache_file_handle.writer(io, &cache_file_writer_buf);
+    try std.json.Stringify.value(MirrorFile{
+        .time = .now(io, .real),
+        .mirros = mirrors.items,
+    }, .{}, &cache_file_writer.interface);
+    try cache_file_writer.flush();
+
+    return mirrors.items;
+}
+
+pub fn pingUrl(io: std.Io, url: []const u8) !std.Io.Duration {
+    const uri: std.Uri = try .parse(url);
+    var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
+    const host = try uri.getHost(&host_buf);
+    const protocol = std.http.Client.Protocol.fromUri(uri) orelse return error.NoProtocol;
+
+    const port: u16 = switch (protocol) { //TODO: protocol.port()
+        .plain => 80,
+        .tls => 443,
+    };
+
+    // TODO: replace select timeout with timeout from IpAddress.ConnectOptions when its implemented
+    const SelectUnion = union(enum) {
+        stream: std.Io.net.HostName.ConnectError!std.Io.net.Stream,
+        timeout: std.Io.Cancelable!void,
+    };
+    var select_buf: [2]SelectUnion = undefined;
+    var select: std.Io.Select(SelectUnion) = .init(io, &select_buf);
+    defer while (select.cancel()) |t| switch (t) {
+        .stream => |stream| if (stream) |s| s.close(io) else |_| {},
+        .timeout => {},
+    };
+
+    var timer: std.Io.Timestamp = .now(io, .awake);
+
+    select.concurrent(.stream, std.Io.net.HostName.connect, .{ host, io, port, .{ .mode = .stream } }) catch unreachable;
+    const timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } };
+    select.concurrent(.timeout, std.Io.Timeout.sleep, .{ timeout, io }) catch unreachable;
+
+    switch (try select.await()) {
+        .stream => |stream| {
+            const elapsed = timer.untilNow(io, .awake);
+            (try stream).close(io);
+            return elapsed;
+        },
+        .timeout => return error.Timeout,
+    }
 }
 
 fn fetchZigIndex(
     io: std.Io,
-    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
     data_dir: Dir,
     progress_node: std.Progress.Node,
 ) ![]u8 {
@@ -533,15 +632,15 @@ fn fetchZigIndex(
     (b: {
         var get: HttpGet = undefined;
         var buf: [1024 * 8]u8 = undefined;
-        const reader = get.init(io, gpa, zig_version_index_url, &buf) catch |e| break :b e;
+        const reader = get.init(io, arena, zig_version_index_url, &buf) catch |e| break :b e;
         defer get.deinit();
 
-        const body = reader.allocRemaining(gpa, .unlimited) catch |e| break :b e;
+        const body = reader.allocRemaining(arena, .unlimited) catch |e| break :b e;
 
         data_dir.writeFile(io, .{ .sub_path = zig_version_index_cache_path, .data = body }) catch {};
         return body;
     }) catch {
-        const body = try data_dir.readFileAlloc(io, zig_version_index_cache_path, gpa, .unlimited);
+        const body = try data_dir.readFileAlloc(io, zig_version_index_cache_path, arena, .unlimited);
         std.log.warn("failed to zig version index, using cached index instead", .{});
         return body;
     };
@@ -568,7 +667,7 @@ fn fetchFromMirror(
 
     var signature_get: HttpGet = undefined;
     var buf: [1024 * 8]u8 = undefined;
-    const signature_reader = try signature_get.init(io, gpa, signature_url, &buf);
+    const signature_reader = try signature_get.init(io, arena, signature_url, &buf);
     defer signature_get.deinit();
 
     const minisig = try signature_reader.allocRemaining(arena, .unlimited);
@@ -586,7 +685,7 @@ fn fetchFromMirror(
 
         var get: HttpGet = undefined;
         var transfer_buf: [1024]u8 = undefined; // TODO: readerDecompressing has undocumented minimum transfer_buf size
-        const get_reader = try get.init(io, gpa, tarball_url, &transfer_buf);
+        const get_reader = try get.init(io, arena, tarball_url, &transfer_buf);
         defer get.deinit();
 
         var progress_reader: ProgressReader = .init(get_reader, download_node, get.response.head.content_length, &.{});
@@ -795,7 +894,7 @@ const zig_version_index_url = "https://ziglang.org/download/index.json";
 const zig_version_index_cache_path = "zig-index.json";
 
 const zig_mirrors_url = "https://ziglang.org/download/community-mirrors.txt";
-const zig_mirrors_cache_path = "zig-mirrors.txt";
+const zig_mirrors_cache_path = "zig-mirrors.json";
 
 const symlink_dir_path = "bin";
 
