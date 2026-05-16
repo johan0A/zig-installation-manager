@@ -60,7 +60,7 @@ shell's startup file.
 ### Bash
 
 ```sh
-complete -C 'zim autocomplete' zim
+complete -C 'zim bash-complete' zim
 ```
 
 Add it to `~/.bashrc` (Linux) or `~/.bash_profile` (macOS).
@@ -69,7 +69,7 @@ Add it to `~/.bashrc` (Linux) or `~/.bash_profile` (macOS).
 
 ```sh
 autoload -U +X bashcompinit && bashcompinit
-complete -C 'zim autocomplete' zim
+complete -C 'zim bash-complete' zim
 ```
 
 Add it to `~/.zshrc`. This is the right setup for the default shell on macOS.
