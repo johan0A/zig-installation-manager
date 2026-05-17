@@ -17,6 +17,10 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     });
 
+    var options = b.addOptions();
+    options.addOption([]const u8, "version", zon.version);
+    root_module.addOptions("options", options);
+
     const exe = b.addExecutable(.{
         .root_module = root_module,
         .name = @tagName(zon.name),

@@ -57,7 +57,7 @@ pub fn main(init: std.process.Init) !void {
     const Command = union(enum) {
         const Version = struct { version: ?[]const u8 = null, help: bool = false };
         const Fetch = struct { version: ?[]const u8 = null, force: bool = false, zls: bool = false, help: bool = false };
-        const List = struct { help: bool = false };
+        const Help = struct { help: bool = false };
 
         none,
         unknown: []const u8,
@@ -65,7 +65,8 @@ pub fn main(init: std.process.Init) !void {
         install: Fetch,
         use: Version,
         remove: Version,
-        list: List,
+        list: Help,
+        version: Help,
     };
 
     const CommandTag = @typeInfo(Command).@"union".tag_type.?;
@@ -76,6 +77,7 @@ pub fn main(init: std.process.Init) !void {
         .{ "list", .list },       .{ "ls", .list },
         .{ "help", .help },       .{ "h", .help },
         .{ "--help", .help },     .{ "-h", .help },
+        .{ "version", .version },
     });
 
     const command: Command = blk: {
@@ -127,7 +129,7 @@ pub fn main(init: std.process.Init) !void {
                 break :blk .{ .remove = remove };
             },
             .list => {
-                var list: Command.List = .{};
+                var list: Command.Help = .{};
                 while (args.next()) |arg| {
                     if (anyEql(arg, &.{ "-h", "--help" })) {
                         list.help = true;
@@ -136,6 +138,17 @@ pub fn main(init: std.process.Init) !void {
                     }
                 }
                 break :blk .{ .list = list };
+            },
+            .version => {
+                var version: Command.Help = .{};
+                while (args.next()) |arg| {
+                    if (anyEql(arg, &.{ "-h", "--help" })) {
+                        version.help = true;
+                    } else if (std.mem.startsWith(u8, arg, "-")) {
+                        if (!completion) fatal("unrecognized flag: {s}", .{arg});
+                    }
+                }
+                break :blk .{ .version = version };
             },
             .unknown, .none => unreachable,
         }
@@ -178,6 +191,14 @@ pub fn main(init: std.process.Init) !void {
                 }
                 try listVersions(io, arena, data_dir, stdout);
             },
+            .version => |c| {
+                if (c.help) {
+                    std.log.info("{s}", .{version_usage});
+                    return;
+                }
+                try stdout.print("{s}\n", .{options.version});
+                try stdout.flush();
+            },
         }
     } else {
         const local = struct {
@@ -188,21 +209,24 @@ pub fn main(init: std.process.Init) !void {
             }
         };
         switch (command) {
+            .none, .unknown, .help => {},
+            inline .install, .use, .remove, .list, .version => |c| {
+                local.complete(stdout, incomplete_arg, "--help", c.help);
+                local.complete(stdout, incomplete_arg, "-h", c.help);
+            },
+        }
+        switch (command) {
             .none => {
                 for (command_map.keys()) |key|
                     local.complete(stdout, incomplete_arg, key, false);
             },
-            .unknown, .help => {},
+            .list, .version, .unknown, .help => {},
             .install => |c| {
-                local.complete(stdout, incomplete_arg, "--help", c.help);
-                local.complete(stdout, incomplete_arg, "-h", c.help);
                 local.complete(stdout, incomplete_arg, "--force", c.force);
                 local.complete(stdout, incomplete_arg, "--zls", c.zls);
                 // TODO: complete versions
             },
             .use, .remove => |c| {
-                local.complete(stdout, incomplete_arg, "--help", c.help);
-                local.complete(stdout, incomplete_arg, "-h", c.help);
                 if (c.version == null) {
                     const versions_dir = openVersionsDir(io, data_dir) catch return;
                     var dir_it = versions_dir.iterate();
@@ -210,10 +234,6 @@ pub fn main(init: std.process.Init) !void {
                         if (std.mem.startsWith(u8, entry.name, incomplete_arg))
                             stdout.print("{s}\n", .{entry.name}) catch return;
                 }
-            },
-            .list => |c| {
-                local.complete(stdout, incomplete_arg, "--help", c.help);
-                local.complete(stdout, incomplete_arg, "-h", c.help);
             },
         }
     }
@@ -887,6 +907,16 @@ pub const remove_usage =
     \\
 ;
 
+pub const version_usage =
+    \\Usage: zim version
+    \\
+    \\Print the version number of zim
+    \\
+    \\Options:
+    \\  -h, --help     Show this help
+    \\
+;
+
 const zig_pubkey = "RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U";
 const zls_pubkey = "RWR+9B91GBZ0zOjh6Lr17+zKf5BoSuFvrx2xSeDE57uIYvnKBGmMjOex";
 
@@ -903,3 +933,5 @@ const builtin = @import("builtin");
 const Ed25519 = std.crypto.sign.Ed25519;
 const ProgressReader = @import("ProgressReader.zig");
 const Dir = std.Io.Dir;
+
+const options = @import("options");
