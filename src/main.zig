@@ -212,19 +212,26 @@ pub fn main(init: std.process.Init) !void {
             .none, .unknown, .help => {},
             inline .install, .use, .remove, .list, .version => |c| {
                 local.complete(stdout, incomplete_arg, "--help", c.help);
-                local.complete(stdout, incomplete_arg, "-h", c.help);
             },
         }
         switch (command) {
             .none => {
-                for (command_map.keys()) |key|
+                for (command_map.keys()) |key| {
+                    if (key.len <= 2) continue;
                     local.complete(stdout, incomplete_arg, key, false);
+                }
             },
             .list, .version, .unknown, .help => {},
             .install => |c| {
                 local.complete(stdout, incomplete_arg, "--force", c.force);
                 local.complete(stdout, incomplete_arg, "--zls", c.zls);
-                // TODO: complete versions
+                if (c.version == null) {
+                    const zig_version_index = try getZigIndex(io, arena, data_dir, progress_root);
+                    var it = zig_version_index.iterator();
+                    while (it.next()) |entry| {
+                        local.complete(stdout, incomplete_arg, entry.key_ptr.*, c.zls);
+                    }
+                }
             },
             .use, .remove => |c| {
                 if (c.version == null) {
@@ -367,12 +374,11 @@ fn installVersion(
 ) !void {
     const versions_dir = try openVersionsDir(io, data_dir);
 
-    const zig_version_index_body = try fetchZigIndex(io, arena, data_dir, progress_node);
-    const zig_version_index = try std.json.parseFromSliceLeaky(std.json.Value, arena, zig_version_index_body, .{});
+    const zig_version_index = try getZigIndex(io, arena, data_dir, progress_node);
 
     const zig_version: std.SemanticVersion = switch (version_arg) {
         .master => blk: {
-            const master_version_str = zig_version_index.object.get("master").?.object.get("version").?.string;
+            const master_version_str = zig_version_index.get("master").?.object.get("version").?.string;
             break :blk try .parse(master_version_str);
         },
         .semver => |v| v,
@@ -410,7 +416,7 @@ fn installVersion(
             }),
         };
 
-        const mirrors = try fetchMirrors(io, arena, data_dir, version_arg, zig_version_str, progress_node);
+        const mirrors = try getMirrors(io, arena, data_dir, version_arg, zig_version_str, progress_node);
         std.mem.sortUnstable(Mirror, mirrors, {}, struct {
             fn f(_: void, lhs: Mirror, rhs: Mirror) bool {
                 const lhs_int = if (lhs.ping) |p| p.nanoseconds else std.math.maxInt(i96);
@@ -511,7 +517,7 @@ const Mirror = struct {
     url: []const u8,
 };
 
-fn fetchMirrors(
+fn getMirrors(
     io: std.Io,
     arena: std.mem.Allocator,
     data_dir: Dir,
@@ -522,30 +528,14 @@ fn fetchMirrors(
     const node = progress_node.start("fetching mirrors list", 0);
     defer node.end();
 
-    const MirrorFile = struct {
-        time: std.Io.Timestamp,
-        mirros: []Mirror,
-    };
-
-    const cache_file = blk: {
-        const cache_file_handle = data_dir.openFile(io, zig_mirrors_cache_path, .{ .mode = .read_write }) catch |err| switch (err) {
-            error.FileNotFound => break :blk null,
-            else => |e| return e,
-        };
-
-        var cache_file_reader_buf: [1024]u8 = undefined;
-        var cache_file_reader = cache_file_handle.reader(io, &cache_file_reader_buf);
-
-        var json_tokenizer: std.json.Reader = .init(arena, &cache_file_reader.interface);
-        const cache_file = std.json.parseFromTokenSourceLeaky(MirrorFile, arena, &json_tokenizer, .{}) catch {
-            break :blk null;
-        };
-
-        if (@abs(cache_file.time.untilNow(io, .real).toSeconds()) < 60 * 60 * 24) {
-            return cache_file.mirros;
-        }
-
-        break :blk cache_file;
+    const cached_mirrors: ?[]Mirror = if (data_dir.statFile(io, zig_mirrors_cache_path, .{})) |stats| blk: {
+        const cached = data_dir.readFileAlloc(io, zig_mirrors_cache_path, arena, .unlimited) catch break :blk null;
+        const parsed = std.json.parseFromSliceLeaky([]Mirror, arena, cached, .{}) catch break :blk null;
+        if (@abs(stats.mtime.untilNow(io, .real).toSeconds()) < 60 * 60 * 24) return parsed;
+        break :blk parsed;
+    } else |err| switch (err) {
+        error.FileNotFound => null,
+        else => |e| return e,
     };
 
     const body = (b: {
@@ -555,9 +545,9 @@ fn fetchMirrors(
         defer get.deinit();
         break :b reader.allocRemaining(arena, .unlimited);
     }) catch |err| {
-        if (cache_file) |c| {
+        if (cached_mirrors) |c| {
             std.log.warn("failed to fetch mirror list, using cached list instead", .{});
-            return c.mirros;
+            return c;
         }
         return err;
     };
@@ -592,10 +582,7 @@ fn fetchMirrors(
     const cache_file_handle = try data_dir.createFile(io, zig_mirrors_cache_path, .{ .read = true });
     var cache_file_writer_buf: [1024]u8 = undefined;
     var cache_file_writer = cache_file_handle.writer(io, &cache_file_writer_buf);
-    try std.json.Stringify.value(MirrorFile{
-        .time = .now(io, .real),
-        .mirros = mirrors.items,
-    }, .{}, &cache_file_writer.interface);
+    try std.json.Stringify.value(mirrors.items, .{}, &cache_file_writer.interface);
     try cache_file_writer.flush();
 
     return mirrors.items;
@@ -640,29 +627,42 @@ pub fn pingUrl(io: std.Io, url: []const u8) !std.Io.Duration {
     }
 }
 
-fn fetchZigIndex(
+fn getZigIndex(
     io: std.Io,
     arena: std.mem.Allocator,
     data_dir: Dir,
     progress_node: std.Progress.Node,
-) ![]u8 {
+) !std.json.ObjectMap {
     const node = progress_node.start("fetching zig index", 0);
     defer node.end();
 
-    (b: {
-        var get: HttpGet = undefined;
-        var buf: [1024 * 8]u8 = undefined;
-        const reader = get.init(io, arena, zig_version_index_url, &buf) catch |e| break :b e;
-        defer get.deinit();
+    const use_cache = if (data_dir.statFile(io, zig_version_index_cache_path, .{})) |stats|
+        stats.mtime.toSeconds() > 60 * 10
+    else |err| switch (err) {
+        error.FileNotFound => false,
+        else => |e| return e,
+    };
 
-        const body = reader.allocRemaining(arena, .unlimited) catch |e| break :b e;
+    const body = sw: switch (use_cache) {
+        false => fetch: {
+            var get: HttpGet = undefined;
+            var buf: [1024 * 8]u8 = undefined;
+            const reader = get.init(io, arena, zig_version_index_url, &buf) catch break :fetch null;
+            defer get.deinit();
+            const body = reader.allocRemaining(arena, .unlimited) catch break :fetch null;
+            data_dir.writeFile(io, .{ .sub_path = zig_version_index_cache_path, .data = body }) catch {};
+            break :fetch body;
+        } orelse {
+            std.log.warn("failed to fetch zig version index, using cached index instead", .{});
+            continue :sw true;
+        },
+        true => try data_dir.readFileAlloc(io, zig_version_index_cache_path, arena, .unlimited),
+    };
 
-        data_dir.writeFile(io, .{ .sub_path = zig_version_index_cache_path, .data = body }) catch {};
-        return body;
-    }) catch {
-        const body = try data_dir.readFileAlloc(io, zig_version_index_cache_path, arena, .unlimited);
-        std.log.warn("failed to zig version index, using cached index instead", .{});
-        return body;
+    const zig_version_index = try std.json.parseFromSliceLeaky(std.json.Value, arena, body, .{});
+    return switch (zig_version_index) {
+        .object => |object| return object,
+        else => error.InvalidIndexFormat,
     };
 }
 
@@ -696,8 +696,8 @@ fn fetchFromMirror(
 
     const temp_file_sub_path = ".tmp-" ++ std.fmt.hex(random.int(u64));
     const temp_file = try temp_dir.createFile(io, temp_file_sub_path, .{ .read = true });
-    defer temp_file.close(io);
     defer temp_dir.deleteFile(io, temp_file_sub_path) catch {};
+    defer temp_file.close(io);
 
     {
         const download_node = progress_node.start("download", 0);
@@ -842,8 +842,6 @@ const HttpGet = struct {
         self.client.deinit();
     }
 };
-
-const VersionIndex = struct {};
 
 pub const usage =
     \\Usage: zim <command> [args]
