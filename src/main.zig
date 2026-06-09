@@ -47,7 +47,7 @@ pub fn main(init: std.process.Init) !void {
     var args: ArgsIt = .{ .args = args_slice };
     _ = args.next();
 
-    const progress_root = std.Progress.start(io, .{ .root_name = "zim" });
+    const progress_root = std.Progress.start(io, .{ .root_name = "zim", .disable_printing = completion });
     defer progress_root.end();
 
     var io_random: std.Random.IoSource = .{ .io = io };
@@ -271,7 +271,8 @@ fn openVersionsDir(io: std.Io, data_dir: Dir) !Dir {
             // migrating old zim-data dir format
             var data_dir_it = data_dir.iterate();
             while (try data_dir_it.next(io)) |entry| {
-                _ = VersionArg.parse(entry.name) catch continue;
+                _ = VersionArg.parse(entry.name) catch
+                    if (!std.mem.eql(u8, entry.name, "master")) continue;
                 try data_dir.rename(entry.name, versions_dir, entry.name, io);
             }
             break :blk versions_dir;
@@ -474,14 +475,15 @@ fn installVersion(
             return error.NoCompatibleZls;
         }
 
-        const zls_version = select_version.object.get("version").?.string;
+        const zls_version_string = select_version.object.get("version").?.string;
+        const zls_version: std.SemanticVersion = try .parse(zls_version_string);
 
-        const tarball_name = switch (zig_version.order(.{ .major = 0, .minor = 14, .patch = 1 })) {
+        const tarball_name = switch (zls_version.order(.{ .major = 0, .minor = 14, .patch = 1 })) {
             .lt => try std.fmt.allocPrint(arena, "zls-{t}-{t}-{s}.tar.xz", .{
-                builtin.target.os.tag, builtin.target.cpu.arch, zls_version,
+                builtin.target.os.tag, builtin.target.cpu.arch, zls_version_string,
             }),
             .eq, .gt => try std.fmt.allocPrint(arena, "zls-{t}-{t}-{s}.tar.xz", .{
-                builtin.target.cpu.arch, builtin.target.os.tag, zls_version,
+                builtin.target.cpu.arch, builtin.target.os.tag, zls_version_string,
             }),
         };
 
@@ -501,7 +503,7 @@ fn installVersion(
             version_sub_dir,
             "zls",
         );
-        std.log.info("installed zls {s}", .{zls_version});
+        std.log.info("installed zls {s}", .{zls_version_string});
     }
 }
 
@@ -816,7 +818,8 @@ const HttpGet = struct {
         switch (self.response.head.status.class()) {
             .success => {},
             else => |class| {
-                std.log.err("HTTP {d} {s}", .{
+                std.log.err("{s}: HTTP {d} {s}", .{
+                    url,
                     @intFromEnum(self.response.head.status),
                     self.response.head.status.phrase() orelse "",
                 });
