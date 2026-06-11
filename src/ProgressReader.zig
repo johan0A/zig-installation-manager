@@ -22,18 +22,14 @@ pub fn init(child: *std.Io.Reader, node: std.Progress.Node, total_bytes: ?usize,
     };
 }
 
-fn advance(self: *ProgressReader, n: usize) void {
+fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+    const self: *ProgressReader = @alignCast(@fieldParentPtr("reader", r));
+    const n = try self.child.stream(w, limit.min(self.transfer_limit));
     if (self.total_bytes) |total_bytes| {
         self.transferred_bytes += n;
         const percent = self.transferred_bytes * 100 / total_bytes;
         self.node.setCompletedItems(percent);
     }
-}
-
-fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
-    const self: *ProgressReader = @alignCast(@fieldParentPtr("reader", r));
-    const n = try self.child.stream(w, limit.min(self.transfer_limit));
-    self.advance(n);
     return n;
 }
 

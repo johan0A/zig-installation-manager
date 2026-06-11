@@ -454,16 +454,18 @@ fn installVersion(
     }
 
     if (fetch_zls) {
-        const zig_version_encoded = try std.mem.replaceOwned(u8, arena, zig_version_str, "+", "%2B");
-        const url = try std.fmt.allocPrint(
-            arena,
-            "https://releases.zigtools.org/v1/zls/select-version?zig_version={s}&compatibility=only-runtime",
-            .{zig_version_encoded},
-        );
+        const uri: std.Uri = .{
+            .scheme = "https",
+            .host = .{ .raw = "releases.zigtools.org" },
+            .path = .{ .raw = "/v1/zls/select-version" },
+            .query = .{
+                .raw = try std.fmt.allocPrint(arena, "zig_version={s}&compatibility=only-runtime", .{zig_version_str}),
+            },
+        };
 
         var transfer_buf: [8 * 1024]u8 = undefined;
         var select_version_get: HttpGet = undefined;
-        const select_version_get_reader = try select_version_get.init(io, arena, url, &transfer_buf);
+        const select_version_get_reader = try select_version_get.init(io, arena, uri, &transfer_buf);
         defer select_version_get.deinit();
 
         var json_tokenizer: std.json.Reader = .init(arena, select_version_get_reader);
@@ -543,7 +545,7 @@ fn getMirrors(
     const body = (b: {
         var get: HttpGet = undefined;
         var buf: [1024 * 8]u8 = undefined;
-        const reader = get.init(io, arena, zig_mirrors_url, &buf) catch |e| break :b e;
+        const reader = get.init(io, arena, zig_mirrors_uri, &buf) catch |e| break :b e;
         defer get.deinit();
         break :b reader.allocRemaining(arena, .unlimited);
     }) catch |err| {
@@ -649,7 +651,7 @@ fn getZigIndex(
         false => fetch: {
             var get: HttpGet = undefined;
             var buf: [1024 * 8]u8 = undefined;
-            const reader = get.init(io, arena, zig_version_index_url, &buf) catch break :fetch null;
+            const reader = get.init(io, arena, zig_version_index_uri, &buf) catch break :fetch null;
             defer get.deinit();
             const body = reader.allocRemaining(arena, .unlimited) catch break :fetch null;
             data_dir.writeFile(io, .{ .sub_path = zig_version_index_cache_path, .data = body }) catch {};
@@ -689,7 +691,7 @@ fn fetchFromMirror(
 
     var signature_get: HttpGet = undefined;
     var buf: [1024 * 8]u8 = undefined;
-    const signature_reader = try signature_get.init(io, arena, signature_url, &buf);
+    const signature_reader = try signature_get.init(io, arena, try .parse(signature_url), &buf);
     defer signature_get.deinit();
 
     const minisig = try signature_reader.allocRemaining(arena, .unlimited);
@@ -707,7 +709,7 @@ fn fetchFromMirror(
 
         var get: HttpGet = undefined;
         var transfer_buf: [1024]u8 = undefined; // TODO: readerDecompressing has undocumented minimum transfer_buf size
-        const get_reader = try get.init(io, arena, tarball_url, &transfer_buf);
+        const get_reader = try get.init(io, arena, try .parse(tarball_url), &transfer_buf);
         defer get.deinit();
 
         var progress_reader: ProgressReader = .init(get_reader, download_node, get.response.head.content_length, &.{});
@@ -802,11 +804,11 @@ const HttpGet = struct {
     response: std.http.Client.Response,
     decompress: std.http.Decompress,
 
-    fn init(self: *HttpGet, io: std.Io, arena: std.mem.Allocator, url: []const u8, transfer_buffer: []u8) !*std.Io.Reader {
+    fn init(self: *HttpGet, io: std.Io, arena: std.mem.Allocator, uri: std.Uri, transfer_buffer: []u8) !*std.Io.Reader {
         self.client = .{ .allocator = arena, .io = io };
         errdefer self.client.deinit();
 
-        self.request = try self.client.request(.GET, try .parse(url), .{});
+        self.request = try self.client.request(.GET, uri, .{});
         errdefer self.request.deinit();
         try self.request.sendBodiless();
 
@@ -818,8 +820,8 @@ const HttpGet = struct {
         switch (self.response.head.status.class()) {
             .success => {},
             else => |class| {
-                std.log.err("{s}: HTTP {d} {s}", .{
-                    url,
+                std.log.err("{f}: HTTP {d} {s}", .{
+                    uri,
                     @intFromEnum(self.response.head.status),
                     self.response.head.status.phrase() orelse "",
                 });
@@ -921,10 +923,10 @@ pub const version_usage =
 const zig_pubkey = "RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U";
 const zls_pubkey = "RWR+9B91GBZ0zOjh6Lr17+zKf5BoSuFvrx2xSeDE57uIYvnKBGmMjOex";
 
-const zig_version_index_url = "https://ziglang.org/download/index.json";
+const zig_version_index_uri = std.Uri.parse("https://ziglang.org/download/index.json") catch unreachable;
 const zig_version_index_cache_path = "zig-index.json";
 
-const zig_mirrors_url = "https://ziglang.org/download/community-mirrors.txt";
+const zig_mirrors_uri = std.Uri.parse("https://ziglang.org/download/community-mirrors.txt") catch unreachable;
 const zig_mirrors_cache_path = "zig-mirrors.json";
 
 const symlink_dir_path = "bin";
