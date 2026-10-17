@@ -481,13 +481,15 @@ fn installVersion(
     }
 
     if (fetch_zls) {
+        const zig_version_str_encoded = try std.fmt.allocPrint(arena, "zig_version={f}&compatibility=only-runtime", .{std.fmt.alt(
+            std.Uri.Component{ .raw = zig_version_str },
+            .formatEscaped,
+        )});
         const uri: std.Uri = .{
             .scheme = "https",
             .host = .{ .raw = "releases.zigtools.org" },
             .path = .{ .raw = "/v1/zls/select-version" },
-            .query = .{
-                .raw = try std.fmt.allocPrint(arena, "zig_version={s}&compatibility=only-runtime", .{zig_version_str}),
-            },
+            .query = .{ .percent_encoded = zig_version_str_encoded },
         };
 
         var transfer_buf: [8 * 1024]u8 = undefined;
