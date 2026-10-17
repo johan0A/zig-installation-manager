@@ -13,21 +13,13 @@ pub fn build(b: *std.Build) !void {
     const optimize = b.standardOptimizeOption(.{});
     const target = b.standardTargetOptions(.{});
 
-    const root_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
     var options = b.addOptions();
     options.addOption([]const u8, "version", zon.version);
-    root_module.addOptions("options", options);
 
     const exe = b.addExecutable(.{
-        .root_module = root_module,
+        .root_module = rootModule(b, target, optimize, options),
         .name = @tagName(zon.name),
     });
-
     b.installArtifact(exe);
 
     const run = b.addRunArtifact(exe);
@@ -49,11 +41,7 @@ pub fn build(b: *std.Build) !void {
     for (targets) |t| {
         const release_exe = b.addExecutable(.{
             .name = @tagName(zon.name),
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/main.zig"),
-                .target = b.resolveTargetQuery(t),
-                .optimize = .ReleaseSafe,
-            }),
+            .root_module = rootModule(b, b.resolveTargetQuery(t), .ReleaseSafe, options),
         });
 
         const tar = b.addRunArtifact(tar_exe);
@@ -64,4 +52,19 @@ pub fn build(b: *std.Build) !void {
 
         release.dependOn(&target_output.step);
     }
+}
+
+fn rootModule(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    options: *std.Build.Step.Options,
+) *std.Build.Module {
+    const root_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    root_module.addOptions("options", options);
+    return root_module;
 }
