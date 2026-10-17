@@ -47,7 +47,7 @@ pub fn main(init: std.process.Init) !void {
     var args: ArgsIt = .{ .args = args_slice };
     _ = args.next();
 
-    const progress_root = std.Progress.start(io, .{ .root_name = "zim", .disable_printing = completion });
+    const progress_root = std.Progress.start(io, .{ .root_name = "zim" });
     defer progress_root.end();
 
     var io_random: std.Random.IoSource = .{ .io = io };
@@ -237,9 +237,10 @@ pub fn main(init: std.process.Init) !void {
                 if (c.version == null) {
                     const versions_dir = openVersionsDir(io, data_dir) catch return;
                     var dir_it = versions_dir.iterate();
-                    while (dir_it.next(io) catch return) |entry|
+                    while (dir_it.next(io) catch return) |entry| {
                         if (std.mem.startsWith(u8, entry.name, incomplete_arg))
                             stdout.print("{s}\n", .{entry.name}) catch return;
+                    }
                 }
             },
         }
@@ -407,13 +408,18 @@ fn installVersion(
         return;
     }
 
+    const extension: []const u8 = switch (builtin.target.os.tag) {
+        .windows => "zip",
+        else => "tar.xz",
+    };
+
     if (fetch_zig) {
         const tarball_name = switch (zig_version.order(.{ .major = 0, .minor = 14, .patch = 1 })) {
-            .lt => try std.fmt.allocPrint(arena, "zig-{t}-{t}-{s}.tar.xz", .{
-                builtin.target.os.tag, builtin.target.cpu.arch, zig_version_str,
+            .lt => try std.fmt.allocPrint(arena, "zig-{t}-{t}-{s}.{s}", .{
+                builtin.target.os.tag, builtin.target.cpu.arch, zig_version_str, extension,
             }),
-            .eq, .gt => try std.fmt.allocPrint(arena, "zig-{t}-{t}-{s}.tar.xz", .{
-                builtin.target.cpu.arch, builtin.target.os.tag, zig_version_str,
+            .eq, .gt => try std.fmt.allocPrint(arena, "zig-{t}-{t}-{s}.{s}", .{
+                builtin.target.cpu.arch, builtin.target.os.tag, zig_version_str, extension,
             }),
         };
 
@@ -481,11 +487,11 @@ fn installVersion(
         const zls_version: std.SemanticVersion = try .parse(zls_version_string);
 
         const tarball_name = switch (zls_version.order(.{ .major = 0, .minor = 14, .patch = 1 })) {
-            .lt => try std.fmt.allocPrint(arena, "zls-{t}-{t}-{s}.tar.xz", .{
-                builtin.target.os.tag, builtin.target.cpu.arch, zls_version_string,
+            .lt => try std.fmt.allocPrint(arena, "zls-{t}-{t}-{s}.{s}", .{
+                builtin.target.os.tag, builtin.target.cpu.arch, zls_version_string, extension,
             }),
-            .eq, .gt => try std.fmt.allocPrint(arena, "zls-{t}-{t}-{s}.tar.xz", .{
-                builtin.target.cpu.arch, builtin.target.os.tag, zls_version_string,
+            .eq, .gt => try std.fmt.allocPrint(arena, "zls-{t}-{t}-{s}.{s}", .{
+                builtin.target.cpu.arch, builtin.target.os.tag, zls_version_string, extension,
             }),
         };
 
@@ -738,11 +744,52 @@ fn fetchFromMirror(
         var progress_reader_buf: [1024 * 8]u8 = undefined;
         var progress_reader: ProgressReader = .init(&file_reader.interface, extract_node, file_reader.getSize() catch null, &progress_reader_buf);
 
-        var xz: std.compress.xz.Decompress = try .init(&progress_reader.reader, gpa, &.{});
-        defer xz.deinit();
+        const temp_dir_path = &std.fmt.hex(random.int(u64));
+        const dest_dir: Dir = try .createDirPathOpen(temp_dir, io, temp_dir_path, .{ .open_options = .{ .iterate = true } });
+        defer dest_dir.close(io);
 
-        const dest_dir: Dir = try .createDirPathOpen(dir, io, sub_path, .{});
-        try std.tar.extract(io, dest_dir, &xz.reader, .{ .strip_components = strip_components });
+        switch (builtin.target.os.tag) {
+            .windows => {
+                const zip_path = std.fmt.hex(random.int(u64)) ++ ".zip";
+                const zip_file = try temp_dir.createFile(io, zip_path, .{ .exclusive = true, .read = true });
+                defer zip_file.close(io);
+
+                var zip_file_buffer: [4096]u8 = undefined;
+                var zip_file_writer = zip_file.writer(io, &zip_file_buffer);
+                _ = try progress_reader.reader.streamRemaining(&zip_file_writer.interface);
+                try zip_file_writer.interface.flush();
+
+                var zip_file_reader = zip_file_writer.moveToReader();
+                try zip_file_reader.seekTo(0);
+
+                try std.zip.extract(dest_dir, &zip_file_reader, .{ .allow_backslashes = true });
+                try temp_dir.deleteFile(io, zip_path);
+
+                if (strip_components == 0) {
+                    try temp_dir.rename(temp_dir_path, dir, sub_path, io);
+                } else {
+                    var walker = try dest_dir.walkSelectively(gpa);
+                    defer walker.deinit();
+
+                    var depth: u32 = 1;
+                    const path = while (try walker.next(io)) |entry| {
+                        if (entry.kind != .directory) continue;
+                        if (depth == strip_components) break entry.path;
+                        try walker.enter(io, entry);
+                        depth += 1;
+                    } else return error.Shrug;
+
+                    try dest_dir.rename(path, dir, sub_path, io);
+                    try temp_dir.deleteTree(io, temp_dir_path);
+                }
+            },
+            else => {
+                var xz: std.compress.xz.Decompress = try .init(&progress_reader.reader, gpa, &.{});
+                defer xz.deinit();
+                try std.tar.extract(io, dest_dir, &xz.reader, .{ .strip_components = strip_components });
+                try temp_dir.rename(temp_dir_path, dir, sub_path, io);
+            },
+        }
     }
 }
 
@@ -923,10 +970,10 @@ pub const version_usage =
 const zig_pubkey = "RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U";
 const zls_pubkey = "RWR+9B91GBZ0zOjh6Lr17+zKf5BoSuFvrx2xSeDE57uIYvnKBGmMjOex";
 
-const zig_version_index_uri = std.Uri.parse("https://ziglang.org/download/index.json") catch unreachable;
+const zig_version_index_uri = std.Uri.parse("https://ziglang.org/download/index.json") catch @compileError("");
 const zig_version_index_cache_path = "zig-index.json";
 
-const zig_mirrors_uri = std.Uri.parse("https://ziglang.org/download/community-mirrors.txt") catch unreachable;
+const zig_mirrors_uri = std.Uri.parse("https://ziglang.org/download/community-mirrors.txt") catch @compileError("");
 const zig_mirrors_cache_path = "zig-mirrors.json";
 
 const symlink_dir_path = "bin";

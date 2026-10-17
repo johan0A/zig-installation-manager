@@ -1,8 +1,6 @@
 # ZIM - Zig installation manager
 
-Zim is a cli tool to download and manages multiple versions of zig and zls.
-
-> Zim is currently incompatible with Windows
+Zim is a cli tool to download and manage multiple versions of zig and zls.
 
 ```
 info: Usage: zim <command> [args]
@@ -32,7 +30,7 @@ Options:
 ```
 
 ```
-> zim f 0.16.0 --zls
+> zim i 0.16.0 --zls
 [3] zim
 ├─ installing zig-x86_64-linux-0.16.0.tar.xz from https://zig-mirror.tsimnet.eu/zig
 └─ [84/100] extract
@@ -54,7 +52,7 @@ fetched versions and the active symlinks.
 
 ## Autocomplete
 
-Zim ships with a built-in completion provider. Add the appropriate line to your
+Zim ships with a built-in completion provider. To use completion add the appropriate lines to your
 shell's startup file.
 
 ### Bash
