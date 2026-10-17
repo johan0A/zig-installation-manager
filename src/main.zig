@@ -1,3 +1,22 @@
+const std = @import("std");
+const builtin = @import("builtin");
+const Ed25519 = std.crypto.sign.Ed25519;
+const ProgressReader = @import("ProgressReader.zig");
+const Dir = std.Io.Dir;
+
+const zig_pubkey = "RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U";
+const zls_pubkey = "RWR+9B91GBZ0zOjh6Lr17+zKf5BoSuFvrx2xSeDE57uIYvnKBGmMjOex";
+
+const zig_version_index_uri = std.Uri.parse("https://ziglang.org/download/index.json") catch @compileError("");
+const zig_version_index_cache_path = "zig-index.json";
+
+const zig_mirrors_uri = std.Uri.parse("https://ziglang.org/download/community-mirrors.txt") catch @compileError("");
+const zig_mirrors_cache_path = "zig-mirrors.json";
+
+const symlink_dir_path = "bin";
+
+const options = @import("options");
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
@@ -12,6 +31,8 @@ pub fn main(init: std.process.Init) !void {
     const exe_path_len = try std.process.executableDirPath(io, &exe_path_buf);
     const exe_dir: Dir = try .openDirAbsolute(io, exe_path_buf[0..exe_path_len], .{ .iterate = true });
     const data_dir = try exe_dir.createDirPathOpen(io, "zim-data", .{ .open_options = .{ .iterate = true } });
+
+    try std.Io.Dir.writeFile(data_dir, io, .{ .data = options.version, .sub_path = "version.txt" });
 
     var args_slice: []const []const u8 = try init.minimal.args.toSlice(arena);
 
@@ -966,22 +987,3 @@ pub const version_usage =
     \\  -h, --help     Show this help
     \\
 ;
-
-const zig_pubkey = "RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U";
-const zls_pubkey = "RWR+9B91GBZ0zOjh6Lr17+zKf5BoSuFvrx2xSeDE57uIYvnKBGmMjOex";
-
-const zig_version_index_uri = std.Uri.parse("https://ziglang.org/download/index.json") catch @compileError("");
-const zig_version_index_cache_path = "zig-index.json";
-
-const zig_mirrors_uri = std.Uri.parse("https://ziglang.org/download/community-mirrors.txt") catch @compileError("");
-const zig_mirrors_cache_path = "zig-mirrors.json";
-
-const symlink_dir_path = "bin";
-
-const std = @import("std");
-const builtin = @import("builtin");
-const Ed25519 = std.crypto.sign.Ed25519;
-const ProgressReader = @import("ProgressReader.zig");
-const Dir = std.Io.Dir;
-
-const options = @import("options");
