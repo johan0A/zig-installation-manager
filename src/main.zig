@@ -313,20 +313,34 @@ fn useVersion(
     if (!try fileExists(io, versions_dir, version)) fatal("version {s} is not installed", .{version});
 
     const symlink_dir = try data_dir.createDirPathOpen(io, symlink_dir_path, .{});
-    for ([_][]const u8{ "zig", "zls" }) |path| {
-        symlink_dir.deleteFile(io, path) catch |err| switch (err) {
-            error.FileNotFound => {},
-            else => |e| return e,
-        };
+
+    const names = [_][]const u8{ "zig", "zls" };
+    inline for (names) |name| {
+        if (builtin.target.os.tag == .windows) {
+            for ([_][]const u8{ name ++ ".exe", name ++ "_path.txt" }) |sub_path| {
+                symlink_dir.deleteFile(io, sub_path) catch |err| switch (err) {
+                    error.FileNotFound => {},
+                    else => |e| return e,
+                };
+            }
+        } else {
+            symlink_dir.deleteFile(io, name) catch |err| switch (err) {
+                error.FileNotFound => {},
+                else => |e| return e,
+            };
+        }
     }
-
-    const zig_target_path = try Dir.path.join(arena, &.{ "..", "versions", version, "zig/zig" });
-    try symlink_dir.symLink(io, zig_target_path, "zig", .{});
-
-    const zls_path = try Dir.path.join(arena, &.{ version, "zls" });
-    if (try fileExists(io, versions_dir, zls_path)) {
-        const zls_target_path = try Dir.path.join(arena, &.{ "..", "versions", version, "zls/zls" });
-        try symlink_dir.symLink(io, zls_target_path, "zls", .{});
+    inline for (names) |name| {
+        if (try fileExists(io, versions_dir, try Dir.path.join(arena, &.{ version, name }))) {
+            if (builtin.target.os.tag == .windows) {
+                const target = try Dir.path.join(arena, &.{ "..", "versions", version, name, name ++ ".exe" });
+                try symlink_dir.writeFile(io, .{ .sub_path = name ++ "_path.txt", .data = target });
+                try symlink_dir.writeFile(io, .{ .sub_path = name ++ ".exe", .data = @embedFile(name ++ "_shim") });
+            } else {
+                const target = try Dir.path.join(arena, &.{ "..", "versions", version, name, name });
+                try symlink_dir.symLink(io, target, name, .{});
+            }
+        }
     }
 
     std.log.info("active version: {s}", .{version});

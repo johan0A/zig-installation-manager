@@ -66,5 +66,20 @@ fn rootModule(
         .optimize = optimize,
     });
     root_module.addOptions("options", options);
+
+    inline for ([_][]const u8{ "zig", "zls" }) |name| {
+        const module = b.createModule(.{
+            .root_source_file = b.path("src/shim.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        const shim_options = b.addOptions();
+        shim_options.addOption([]const u8, "path", name ++ "_path.txt");
+        module.addOptions("options", shim_options);
+
+        const exe = b.addExecutable(.{ .name = name ++ "_shim", .root_module = module });
+        root_module.addAnonymousImport(name ++ "_shim", .{ .root_source_file = exe.getEmittedBin() });
+    }
+
     return root_module;
 }
