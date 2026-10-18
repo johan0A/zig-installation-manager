@@ -129,6 +129,10 @@ pub fn main(init: std.process.Init) !void {
         .{ "version", .version },
     });
 
+    var client: std.http.Client = .{ .io = io, .allocator = arena };
+    defer client.deinit();
+    try client.initDefaultProxies(arena, init.environ_map);
+
     const command: Command = blk: {
         const command_str = args.next() orelse break :blk .none;
         const command = command_map.get(command_str) orelse break :blk .{ .unknown = command_str };
@@ -214,7 +218,7 @@ pub fn main(init: std.process.Init) !void {
                     return;
                 }
                 const v = c.version orelse fatal("missing version argument", .{});
-                try installVersion(io, arena, gpa, random, progress_root, data_dir, try .parse(v), c.force, c.zls);
+                try installVersion(io, arena, gpa, &client, random, progress_root, data_dir, try .parse(v), c.force, c.zls);
                 try useVersion(io, arena, v, data_dir);
             },
             .use => |c| {
@@ -275,7 +279,7 @@ pub fn main(init: std.process.Init) !void {
                 local.complete(stdout, incomplete_arg, "--force", c.force);
                 local.complete(stdout, incomplete_arg, "--zls", c.zls);
                 if (c.version == null) {
-                    const zig_version_index = try getZigIndex(io, arena, data_dir, progress_root);
+                    const zig_version_index = try getZigIndex(io, arena, &client, data_dir, progress_root);
                     var it = zig_version_index.iterator();
                     while (it.next()) |entry| {
                         local.complete(stdout, incomplete_arg, entry.key_ptr.*, c.zls);
@@ -430,6 +434,7 @@ fn installVersion(
     io: std.Io,
     arena: std.mem.Allocator,
     gpa: std.mem.Allocator,
+    client: *std.http.Client,
     random: std.Random,
     progress_node: std.Progress.Node,
     data_dir: Dir,
@@ -438,8 +443,7 @@ fn installVersion(
     zls: bool,
 ) !void {
     const versions_dir = try openVersionsDir(io, data_dir);
-
-    const zig_version_index = try getZigIndex(io, arena, data_dir, progress_node);
+    const zig_version_index = try getZigIndex(io, arena, client, data_dir, progress_node);
 
     const zig_version: std.SemanticVersion = switch (version_arg) {
         .master => blk: {
@@ -486,7 +490,7 @@ fn installVersion(
             }),
         };
 
-        const mirrors = try getMirrors(io, arena, data_dir, version_arg, zig_version_str, progress_node);
+        const mirrors = try getMirrors(io, arena, client, data_dir, version_arg, zig_version_str, progress_node);
         std.mem.sortUnstable(Mirror, mirrors, {}, struct {
             fn f(_: void, lhs: Mirror, rhs: Mirror) bool {
                 const lhs_int = if (lhs.ping) |p| p.nanoseconds else std.math.maxInt(i96);
@@ -502,6 +506,7 @@ fn installVersion(
                 io,
                 gpa,
                 arena,
+                client,
                 random,
                 progress_node,
                 mirror.url,
@@ -536,7 +541,7 @@ fn installVersion(
 
         var transfer_buf: [8 * 1024]u8 = undefined;
         var select_version_get: HttpGet = undefined;
-        const select_version_get_reader = try select_version_get.init(io, arena, uri, &transfer_buf);
+        const select_version_get_reader = try select_version_get.init(client, arena, uri, &transfer_buf);
         defer select_version_get.deinit();
 
         var json_tokenizer: std.json.Reader = .init(arena, select_version_get_reader);
@@ -566,6 +571,7 @@ fn installVersion(
             io,
             gpa,
             arena,
+            client,
             random,
             progress_node,
             "https://builds.zigtools.org",
@@ -595,6 +601,7 @@ const Mirror = struct {
 fn getMirrors(
     io: std.Io,
     arena: std.mem.Allocator,
+    client: *std.http.Client,
     data_dir: Dir,
     version_arg: VersionArg,
     zig_version_str: []const u8,
@@ -616,7 +623,7 @@ fn getMirrors(
     const body = (b: {
         var get: HttpGet = undefined;
         var buf: [1024 * 8]u8 = undefined;
-        const reader = get.init(io, arena, zig_mirrors_uri, &buf) catch |e| break :b e;
+        const reader = get.init(client, arena, zig_mirrors_uri, &buf) catch |e| break :b e;
         defer get.deinit();
         break :b reader.allocRemaining(arena, .unlimited);
     }) catch |err| {
@@ -705,6 +712,7 @@ pub fn pingUrl(io: std.Io, url: []const u8) !std.Io.Duration {
 fn getZigIndex(
     io: std.Io,
     arena: std.mem.Allocator,
+    client: *std.http.Client,
     data_dir: Dir,
     progress_node: std.Progress.Node,
 ) !std.json.ObjectMap {
@@ -722,7 +730,7 @@ fn getZigIndex(
         false => fetch: {
             var get: HttpGet = undefined;
             var buf: [1024 * 8]u8 = undefined;
-            const reader = get.init(io, arena, zig_version_index_uri, &buf) catch break :fetch null;
+            const reader = get.init(client, arena, zig_version_index_uri, &buf) catch break :fetch null;
             defer get.deinit();
             const body = reader.allocRemaining(arena, .unlimited) catch break :fetch null;
             data_dir.writeFile(io, .{ .sub_path = zig_version_index_cache_path, .data = body }) catch {};
@@ -745,6 +753,7 @@ fn fetchFromMirror(
     io: std.Io,
     gpa: std.mem.Allocator,
     arena: std.mem.Allocator,
+    client: *std.http.Client,
     random: std.Random,
     progress_node: std.Progress.Node,
     mirror_url: []const u8,
@@ -762,7 +771,7 @@ fn fetchFromMirror(
 
     var signature_get: HttpGet = undefined;
     var buf: [1024 * 8]u8 = undefined;
-    const signature_reader = try signature_get.init(io, arena, try .parse(signature_url), &buf);
+    const signature_reader = try signature_get.init(client, arena, try .parse(signature_url), &buf);
     defer signature_get.deinit();
 
     const minisig = try signature_reader.allocRemaining(arena, .unlimited);
@@ -780,7 +789,7 @@ fn fetchFromMirror(
 
         var get: HttpGet = undefined;
         var transfer_buf: [1024]u8 = undefined; // TODO: readerDecompressing has undocumented minimum transfer_buf size
-        const get_reader = try get.init(io, arena, try .parse(tarball_url), &transfer_buf);
+        const get_reader = try get.init(client, arena, try .parse(tarball_url), &transfer_buf);
         defer get.deinit();
 
         var progress_reader: ProgressReader = .init(get_reader, download_node, get.response.head.content_length, &.{});
@@ -911,52 +920,36 @@ fn verifyMinisig(
 }
 
 const HttpGet = struct {
-    client: std.http.Client,
     request: std.http.Client.Request,
     response: std.http.Client.Response,
     decompress: std.http.Decompress,
 
-    fn init(self: *HttpGet, io: std.Io, arena: std.mem.Allocator, uri: std.Uri, transfer_buffer: []u8) !*std.Io.Reader {
-        self.client = .{ .allocator = arena, .io = io };
-        errdefer self.client.deinit();
-
-        self.request = try self.client.request(.GET, uri, .{});
+    fn init(
+        self: *HttpGet,
+        client: *std.http.Client,
+        arena: std.mem.Allocator,
+        uri: std.Uri,
+        transfer_buffer: []u8,
+    ) !*std.Io.Reader {
+        self.request = try client.request(.GET, uri, .{});
         errdefer self.request.deinit();
         try self.request.sendBodiless();
 
-        var redirect_buf: [8000]u8 = undefined;
-        self.response = try self.request.receiveHead(&redirect_buf);
+        const redirect_buf = try arena.alloc(u8, 8 * 1024);
+        self.response = try self.request.receiveHead(redirect_buf);
 
-        const decompress_buffer = try arena.alloc(u8, self.response.head.content_encoding.minBufferCapacity());
-
-        switch (self.response.head.status.class()) {
-            .success => {},
-            else => |class| {
-                std.log.err("{f}: HTTP {d} {s}", .{
-                    uri,
-                    @backingInt(self.response.head.status),
-                    self.response.head.status.phrase() orelse "",
-                });
-                return switch (class) {
-                    .informational => error.HttpInformational,
-                    .redirect => error.HttpRedirect,
-                    .client_error => error.HttpClientError,
-                    .server_error => error.HttpServerError,
-                    .success => unreachable,
-                };
-            },
+        const status = self.response.head.status;
+        if (status.class() != .success) {
+            std.log.err("{f}: HTTP {d} {s}", .{ uri, @backingInt(status), status.phrase() orelse "" });
+            return error.HttpError;
         }
 
-        return self.response.readerDecompressing(
-            transfer_buffer,
-            &self.decompress,
-            decompress_buffer,
-        );
+        const decompress_buf = try arena.alloc(u8, self.response.head.content_encoding.minBufferCapacity());
+        return self.response.readerDecompressing(transfer_buffer, &self.decompress, decompress_buf);
     }
 
     fn deinit(self: *HttpGet) void {
         self.request.deinit();
-        self.client.deinit();
     }
 };
 
