@@ -624,7 +624,7 @@ fn getMirrors(
 pub fn pingUrl(io: std.Io, url: []const u8) !std.Io.Duration {
     const uri: std.Uri = try .parse(url);
     var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
-    const host = try uri.getHost(&host_buf);
+    const host = try std.Io.net.HostName.fromUri(uri, &host_buf);
     const protocol = std.http.Client.Protocol.fromUri(uri) orelse return error.NoProtocol;
 
     const port: u16 = switch (protocol) { //TODO: protocol.port()
@@ -892,7 +892,7 @@ const HttpGet = struct {
             else => |class| {
                 std.log.err("{f}: HTTP {d} {s}", .{
                     uri,
-                    @intFromEnum(self.response.head.status),
+                    @backingInt(self.response.head.status),
                     self.response.head.status.phrase() orelse "",
                 });
                 return switch (class) {
