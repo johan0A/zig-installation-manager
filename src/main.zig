@@ -36,24 +36,52 @@ pub fn main(init: std.process.Init) !void {
 
     var args_slice: []const []const u8 = try init.minimal.args.toSlice(arena);
 
-    const completion = if (args_slice.len > 1) std.mem.eql(u8, args_slice[1], "bash-complete") else false;
+    if (args_slice.len > 1 and std.mem.eql(u8, args_slice[1], "powershell-complete-script")) {
+        try stdout.writeAll(powershell_script);
+        return;
+    }
 
-    var incomplete_arg: []const u8 = undefined;
+    const CompletionMode = enum { none, bash, powershell };
+    const completion_mode: CompletionMode = blk: {
+        if (args_slice.len < 2) break :blk .none;
+        if (std.mem.eql(u8, args_slice[1], "bash-complete")) break :blk .bash;
+        if (std.mem.eql(u8, args_slice[1], "powershell-complete")) break :blk .powershell;
+        break :blk .none;
+    };
+    const completion = completion_mode != .none;
 
-    if (completion) {
-        const comp_line = init.environ_map.get("COMP_LINE") orelse return;
-        const comp_point_str = init.environ_map.get("COMP_POINT") orelse "0";
-        const comp_point = std.fmt.parseInt(usize, comp_point_str, 10) catch comp_line.len;
-        const line = comp_line[0..@min(comp_point, comp_line.len)];
+    var incomplete_arg: []const u8 = "";
 
-        var arglist: std.ArrayList([]const u8) = .empty;
-        var args_it = std.mem.tokenizeScalar(u8, line, ' ');
-        while (args_it.next()) |w| try arglist.append(arena, w);
+    switch (completion_mode) {
+        .none => {},
+        .bash => {
+            const comp_line = init.environ_map.get("COMP_LINE") orelse return;
+            const comp_point_str = init.environ_map.get("COMP_POINT") orelse "0";
+            const comp_point = std.fmt.parseInt(usize, comp_point_str, 10) catch comp_line.len;
+            const line = comp_line[0..@min(comp_point, comp_line.len)];
 
-        const is_fresh_word = line.len == 0 or line[line.len - 1] == ' ';
-        incomplete_arg = if (is_fresh_word) "" else arglist.pop() orelse "";
+            var arglist: std.ArrayList([]const u8) = .empty;
+            var args_it = std.mem.tokenizeScalar(u8, line, ' ');
+            while (args_it.next()) |w| try arglist.append(arena, w);
 
-        args_slice = arglist.items;
+            const is_fresh_word = line.len == 0 or line[line.len - 1] == ' ';
+            incomplete_arg = if (is_fresh_word) "" else arglist.pop() orelse "";
+
+            args_slice = arglist.items;
+        },
+        .powershell => {
+            var stdin_buf: [4096]u8 = undefined;
+            var stdin_impl: std.Io.File.Reader = .init(.stdin(), io, &stdin_buf);
+            const input = stdin_impl.interface.allocRemaining(arena, .limited(64 * 1024)) catch return;
+
+            var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, input, "\r\n"), '\n');
+            incomplete_arg = std.mem.trimEnd(u8, lines.first(), "\r");
+
+            var arglist: std.ArrayList([]const u8) = .empty;
+            while (lines.next()) |l| try arglist.append(arena, std.mem.trimEnd(u8, l, "\r"));
+
+            args_slice = arglist.items;
+        },
     }
 
     const ArgsIt = struct {
@@ -1001,5 +1029,25 @@ pub const version_usage =
     \\
     \\Options:
     \\  -h, --help     Show this help
+    \\
+;
+
+const powershell_script =
+    \\Register-ArgumentCompleter -Native -CommandName zim -ScriptBlock {
+    \\    param($word, $ast, $pos)
+    \\    $elements = @($ast.CommandElements | Where-Object { $_.Extent.StartOffset -lt $pos })
+    \\    $words = @($elements | ForEach-Object {
+    \\        if ($_ -is [System.Management.Automation.Language.StringConstantExpressionAst]) { $_.Value }
+    \\        else { $_.Extent.Text }
+    \\    })
+    \\    # The word under the cursor is being completed; after a space, an empty word is.
+    \\    $current = ''
+    \\    if ($elements[-1].Extent.EndOffset -ge $pos) {
+    \\        $current = $words[-1]
+    \\        $words = @($words | Select-Object -SkipLast 1)
+    \\    }
+    \\    (@($current) + $words) -join "`n" | zim powershell-complete |
+    \\        ForEach-Object { [System.Management.Automation.CompletionResult]::new($_) }
+    \\}
     \\
 ;

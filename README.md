@@ -71,3 +71,11 @@ complete -C 'zim bash-complete' zim
 ```
 
 Add it to `~/.zshrc`. This is the right setup for the default shell on macOS.
+
+### PowerShell
+
+```powershell
+zim powershell-complete-script | Out-String | Invoke-Expression
+```
+
+Add it to `$PROFILE`. If if `$PROFILE` doesnt exist first create it with with `New-Item -Force $PROFILE`.
