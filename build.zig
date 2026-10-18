@@ -39,16 +39,20 @@ pub fn build(b: *std.Build) !void {
     });
 
     for (targets) |t| {
+        const reolved_target = b.resolveTargetQuery(t);
         const release_exe = b.addExecutable(.{
             .name = @tagName(zon.name),
-            .root_module = rootModule(b, b.resolveTargetQuery(t), .ReleaseSafe, options),
+            .root_module = rootModule(b, reolved_target, .ReleaseSafe, options),
         });
+
+        const extension = if (reolved_target.result.os.tag == .windows) "zip" else "tar";
 
         const tar = b.addRunArtifact(tar_exe);
         tar.addFileArg(release_exe.getEmittedBin());
         const output = tar.addOutputFileArg("output.tar");
+        tar.addArg(extension);
 
-        const target_output = b.addInstallFile(output, b.fmt("release/{s}.tar", .{try t.zigTriple(b.allocator)}));
+        const target_output = b.addInstallFile(output, b.fmt("release/{s}.{s}", .{ try t.zigTriple(b.allocator), extension }));
 
         release.dependOn(&target_output.step);
     }
