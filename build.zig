@@ -61,7 +61,7 @@ pub fn build(b: *std.Build) !void {
 fn rootModule(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.OptimizeMode,
     options: *std.Build.Step.Options,
 ) *std.Build.Module {
     const root_module = b.createModule(.{

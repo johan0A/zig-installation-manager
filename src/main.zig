@@ -453,9 +453,9 @@ fn installVersion(
         .semver => |v| v,
     };
 
-    const zig_version_str = try std.fmt.allocPrint(arena, "{f}", .{zig_version});
+    const zig_version_str = try arena.print("{f}", .{zig_version});
 
-    const version_name = try std.fmt.allocPrint(arena, "{f}", .{version_arg});
+    const version_name = try arena.print("{f}", .{version_arg});
     var version_sub_dir: Dir = try .createDirPathOpen(versions_dir, io, version_name, .{});
     defer version_sub_dir.close(io);
 
@@ -482,10 +482,10 @@ fn installVersion(
 
     if (fetch_zig) {
         const tarball_name = switch (zig_version.order(.{ .major = 0, .minor = 14, .patch = 1 })) {
-            .lt => try std.fmt.allocPrint(arena, "zig-{t}-{t}-{s}.{s}", .{
+            .lt => try arena.print("zig-{t}-{t}-{s}.{s}", .{
                 builtin.target.os.tag, builtin.target.cpu.arch, zig_version_str, extension,
             }),
-            .eq, .gt => try std.fmt.allocPrint(arena, "zig-{t}-{t}-{s}.{s}", .{
+            .eq, .gt => try arena.print("zig-{t}-{t}-{s}.{s}", .{
                 builtin.target.cpu.arch, builtin.target.os.tag, zig_version_str, extension,
             }),
         };
@@ -528,7 +528,7 @@ fn installVersion(
     }
 
     if (fetch_zls) {
-        const zig_version_str_encoded = try std.fmt.allocPrint(arena, "zig_version={f}&compatibility=only-runtime", .{std.fmt.alt(
+        const zig_version_str_encoded = try arena.print("zig_version={f}&compatibility=only-runtime", .{std.fmt.alt(
             std.Uri.Component{ .raw = zig_version_str },
             .formatEscaped,
         )});
@@ -557,10 +557,10 @@ fn installVersion(
         const zls_version: std.SemanticVersion = try .parse(zls_version_string);
 
         const tarball_name = switch (zls_version.order(.{ .major = 0, .minor = 14, .patch = 1 })) {
-            .lt => try std.fmt.allocPrint(arena, "zls-{t}-{t}-{s}.{s}", .{
+            .lt => try arena.print("zls-{t}-{t}-{s}.{s}", .{
                 builtin.target.os.tag, builtin.target.cpu.arch, zls_version_string, extension,
             }),
-            .eq, .gt => try std.fmt.allocPrint(arena, "zls-{t}-{t}-{s}.{s}", .{
+            .eq, .gt => try arena.print("zls-{t}-{t}-{s}.{s}", .{
                 builtin.target.cpu.arch, builtin.target.os.tag, zls_version_string, extension,
             }),
         };
@@ -644,7 +644,7 @@ fn getMirrors(
     }
 
     const ziglang_url = switch (version_arg == .master) {
-        false => try std.fmt.allocPrint(arena, "https://ziglang.org/download/{s}", .{zig_version_str}),
+        false => try arena.print("https://ziglang.org/download/{s}", .{zig_version_str}),
         true => "https://ziglang.org/builds",
     };
     try mirrors.append(arena, .{ .ping = null, .url = ziglang_url });
@@ -767,7 +767,7 @@ fn fetchFromMirror(
     const mirror_node = progress_node.startFmt(0, "installing {s} from {s}", .{ tarball_name, mirror_url });
     defer mirror_node.end();
 
-    const signature_url = try std.fmt.allocPrint(arena, "{s}/{s}.minisig?source=zim", .{ mirror_url, tarball_name });
+    const signature_url = try arena.print("{s}/{s}.minisig?source=zim", .{ mirror_url, tarball_name });
 
     var signature_get: HttpGet = undefined;
     var buf: [1024 * 8]u8 = undefined;
@@ -776,7 +776,7 @@ fn fetchFromMirror(
 
     const minisig = try signature_reader.allocRemaining(arena, .unlimited);
 
-    const tarball_url = try std.fmt.allocPrint(arena, "{s}/{s}?source=zim", .{ mirror_url, tarball_name });
+    const tarball_url = try arena.print("{s}/{s}?source=zim", .{ mirror_url, tarball_name });
 
     const temp_file_sub_path = ".tmp-" ++ std.fmt.hex(random.int(u64));
     const temp_file = try temp_dir.createFile(io, temp_file_sub_path, .{ .read = true });
