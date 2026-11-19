@@ -720,7 +720,7 @@ fn getZigIndex(
     defer node.end();
 
     const use_cache = if (data_dir.statFile(io, zig_version_index_cache_path, .{})) |stats|
-        stats.mtime.toSeconds() > 60 * 10
+        @abs(stats.mtime.untilNow(io, .real).toSeconds()) < 60 * 10
     else |err| switch (err) {
         error.FileNotFound => false,
         else => |e| return e,
